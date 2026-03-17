@@ -1,0 +1,41 @@
+{
+  "appId": "com.ywcoder.app",
+  "productName": "YWCodeR",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "package.json",
+    "logo.png"
+  ],
+  "icon": "logo.png",
+  "compression": "maximum",
+  "asar": true,
+  "asarUnpack": [],
+  "removePackageScripts": true,
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "target": ["dmg"],
+    "icon": "logo.png"
+  },
+  "win": {
+    "target": ["nsis"],
+    "signAndEditExecutable": false,
+    "icon": "logo.png",
+    "compression": "maximum"
+  },
+  "linux": {
+    "target": ["AppImage"],
+    "icon": "logo.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "YWCodeR"
+  }
+}
