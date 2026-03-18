@@ -27,6 +27,7 @@ import {
   Terminal,
   CheckCircle2,
   AlertCircle,
+  XCircle,
   HelpCircle,
   Bot,
   Command,
@@ -219,7 +220,6 @@ const CodeBlock: React.FC<{ code: string; language: string; onCopy: (code: strin
       <div className="flex items-center justify-between px-3 py-1.5 bg-muted/80 border-b">
         <div className="flex items-center gap-2">
           <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium text-muted-foreground">{language}</span>
           {detectedFilePath && (
             <span className="text-[10px] text-primary/70 bg-primary/10 px-1.5 py-0.5 rounded">
               {detectedFilePath}
@@ -680,6 +680,7 @@ interface MessageContentProps {
   fileEdits?: FileEditInfo[];
   agentQuestions?: AgentQuestion[];
   streamingItems?: StreamingItem[];
+  todoItems?: TodoItem[];
   isStreaming?: boolean;
   onCopy: (code: string) => void;
   copiedCode: string | null;
@@ -705,17 +706,127 @@ const StreamingContent: React.FC<{ content: string; onCopy: (code: string) => vo
 }
 
 const MessageContent: React.FC<MessageContentProps> = ({
-  content, thinking, toolCalls, fileEdits, agentQuestions, streamingItems, isStreaming, onCopy, copiedCode,
+  content, thinking, toolCalls, fileEdits, agentQuestions, streamingItems, todoItems, isStreaming, onCopy, copiedCode,
   expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall, onAnswerQuestion, messageId
 }) => {
+  // 解析 content 中的各种标签
+  const parsedContent = useMemo(() => {
+    if (!content) return { thinking: null, todoItems: null, options: null, question: null, cleanedContent: '' };
+    
+    let cleaned = content;
+    let parsedThinking: string | null = null;
+    let parsedTodoItems: TodoItem[] | null = null;
+    let parsedOptions: { id: string; label: string; value: string }[] | null = null;
+    let parsedQuestion: { question: string; options: { id: string; label: string; value: string }[] } | null = null;
+    
+    // 解析 <thinking> 或 <think> 标签
+    const thinkingMatch = content.match(/<(think|thinking)>([\s\S]*?)<\/(think|thinking)>/i);
+    if (thinkingMatch) {
+      parsedThinking = thinkingMatch[2].trim();
+      cleaned = cleaned.replace(thinkingMatch[0], '');
+    }
+    
+    // 解析 <question> 标签（包含问题文本和选项）
+    const questionMatch = content.match(/<question>([\s\S]*?)<\/question>/i);
+    if (questionMatch) {
+      const questionContent = questionMatch[1];
+      // 提取问题文本（第一个 <option 之前的文本）
+      const questionTextMatch = questionContent.match(/^([^<]*)/);
+      const questionText = questionTextMatch ? questionTextMatch[1].trim() : '';
+      
+      // 提取所有选项 - 支持属性之间有或无空格
+      const options: { id: string; label: string; value: string }[] = [];
+      const optionRegex = /<option\s*(?:id="([^"]+)")?\s*value="([^"]+)"[^>]*>([^<]*)<\/option>/gi;
+      let match;
+      let idx = 0;
+      while ((match = optionRegex.exec(questionContent)) !== null) {
+        options.push({
+          id: match[1] || `option-${idx++}`,
+          value: match[2],
+          label: match[3].trim() || match[2]
+        });
+      }
+      
+      if (questionText || options.length > 0) {
+        parsedQuestion = { question: questionText, options };
+        if (options.length > 0) parsedOptions = options;
+      }
+      cleaned = cleaned.replace(questionMatch[0], '');
+    }
+    
+    // 解析 <todo> 标签
+    const todoMatch = content.match(/<todo>([\s\S]*?)<\/todo>/i);
+    if (todoMatch) {
+      const todoContent = todoMatch[1];
+      const tasks: TodoItem[] = [];
+      // 支持属性之间有或无空格: <task id="1" status="pending"> 或 <taskid="1"status="pending">
+      const taskRegex = /<task\s*(?:id="([^"]+)")?\s*(?:status="([^"]+)")?[^>]*>([^<]*)<\/task>/g;
+      let match;
+      while ((match = taskRegex.exec(todoContent)) !== null) {
+        const id = match[1] || `task-${tasks.length}`;
+        const status = (match[2] || 'pending') as 'pending' | 'in_progress' | 'completed' | 'failed';
+        const taskContent = match[3].trim();
+        if (taskContent) {
+          tasks.push({ id, status, content: taskContent });
+        }
+      }
+      if (tasks.length > 0) parsedTodoItems = tasks;
+      cleaned = cleaned.replace(todoMatch[0], '');
+    }
+    
+    // 解析 <option> 标签
+    const optionMatch = content.match(/<options>([\s\S]*?)<\/options>/i);
+    if (optionMatch) {
+      const optionsContent = optionMatch[1];
+      const options: { id: string; label: string; value: string }[] = [];
+      const optionRegex = /<option[^>]*value="([^"]+)"[^>]*>([^<]*)<\/option>/g;
+      let match;
+      let idx = 0;
+      while ((match = optionRegex.exec(optionsContent)) !== null) {
+        options.push({
+          id: `option-${idx++}`,
+          value: match[1],
+          label: match[2].trim() || match[1]
+        });
+      }
+      if (options.length > 0) parsedOptions = options;
+      cleaned = cleaned.replace(optionMatch[0], '');
+    }
+    
+    return { 
+      thinking: parsedThinking, 
+      todoItems: parsedTodoItems, 
+      options: parsedOptions,
+      question: parsedQuestion,
+      cleanedContent: cleaned.trim() 
+    };
+  }, [content]);
+
+  // 使用解析的 todo 或传入的 todo
+  const effectiveTodoItems = todoItems || parsedContent.todoItems;
+  
+  // 解析的思考内容（优先使用 props，其次解析 content）
+  const effectiveThinking = thinking || parsedContent.thinking;
+  
+  // 解析的 options
+  const effectiveOptions = parsedContent.options;
+
+  // 计算任务进度
+  const todoProgress = useMemo(() => {
+    if (!effectiveTodoItems || effectiveTodoItems.length === 0) return null;
+    const completed = effectiveTodoItems.filter(t => t.status === 'completed').length;
+    const total = effectiveTodoItems.length;
+    return { completed, total, percentage: Math.round((completed / total) * 100) };
+  }, [effectiveTodoItems]);
+
   // 如果有 streamingItems，按时间顺序渲染
   if (streamingItems && streamingItems.length > 0) {
     return (
       <>
         {/* Thinking Process - AI思考过程最先展示 */}
-        {thinking && (
+        {effectiveThinking && (
           <ThinkingBlock
-            thinking={thinking}
+            thinking={effectiveThinking}
             isStreaming={isStreaming}
             isExpanded={expandedThinkingMsgs.has(messageId)}
             onToggle={() => onToggleThinking(messageId)}
@@ -752,12 +863,83 @@ const MessageContent: React.FC<MessageContentProps> = ({
           </div>
         )}
 
+        {/* Todo Items - 任务进度展示 */}
+        {effectiveTodoItems && effectiveTodoItems.length > 0 && (
+          <div className="my-3 p-3 bg-muted/50 rounded-lg border">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2 text-xs font-medium">
+                <ListTodo className="w-4 h-4 text-primary" />
+                <span>任务进度</span>
+              </div>
+              {todoProgress && (
+                <span className="text-xs text-muted-foreground">
+                  {todoProgress.completed}/{todoProgress.total} ({todoProgress.percentage}%)
+                </span>
+              )}
+            </div>
+            {todoProgress && (
+              <div className="w-full h-1.5 bg-muted rounded-full mb-3 overflow-hidden">
+                <div 
+                  className="h-full bg-primary rounded-full transition-all duration-300"
+                  style={{ width: `${todoProgress.percentage}%` }}
+                />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              {effectiveTodoItems.map((item) => (
+                <div 
+                  key={item.id}
+                  className={cn(
+                    "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
+                    item.status === 'pending' && "bg-muted/50 text-muted-foreground border",
+                    item.status === 'in_progress' && "bg-blue-500/10 text-blue-600 border border-blue-500/20",
+                    item.status === 'completed' && "bg-green-500/10 text-green-600 line-through",
+                    item.status === 'failed' && "bg-red-500/10 text-red-600 border border-red-500/20"
+                  )}
+                >
+                  {item.status === 'pending' && <Circle className="w-3 h-3" />}
+                  {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {item.status === 'completed' && <CheckCircle2 className="w-3 h-3" />}
+                  {item.status === 'failed' && <XCircle className="w-3 h-3" />}
+                  <span className="flex-1">{item.content}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Question - 问题展示 */}
+        {parsedContent.question && (
+          <div className="my-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+            <div className="flex items-center gap-2 mb-2 text-xs font-medium text-amber-600">
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span>需要您的回答</span>
+            </div>
+            <p className="text-sm text-foreground mb-3">{parsedContent.question.question}</p>
+          </div>
+        )}
+
+        {/* Options - 选项按钮展示 */}
+        {effectiveOptions && effectiveOptions.length > 0 && onAnswerQuestion && (
+          <div className="my-3 flex flex-wrap gap-2">
+            {effectiveOptions.map((option) => (
+              <button
+                key={option.id}
+                onClick={() => onAnswerQuestion(option.id, option.value)}
+                className="px-3 py-2 text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-lg transition-colors"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Content - AI回复内容 */}
         <div className="prose prose-sm dark:prose-invert max-w-none">
           {isStreaming ? (
-            <StreamingContent content={content} onCopy={onCopy} copiedCode={copiedCode} />
+            <StreamingContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
           ) : (
-            <MarkdownContent content={content} onCopy={onCopy} copiedCode={copiedCode} />
+            <MarkdownContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
           )}
         </div>
       </>
@@ -768,9 +950,9 @@ const MessageContent: React.FC<MessageContentProps> = ({
   return (
     <>
       {/* Thinking Process - AI思考过程最先展示 */}
-      {thinking && (
+      {effectiveThinking && (
         <ThinkingBlock
-          thinking={thinking}
+          thinking={effectiveThinking}
           isStreaming={isStreaming}
           isExpanded={expandedThinkingMsgs.has(messageId)}
           onToggle={() => onToggleThinking(messageId)}
@@ -806,12 +988,93 @@ const MessageContent: React.FC<MessageContentProps> = ({
         </div>
       )}
 
+      {/* Todo Items - 任务进度展示 */}
+      {effectiveTodoItems && effectiveTodoItems.length > 0 && (
+        <div className="my-3 p-3 bg-muted/50 rounded-lg border">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <ListTodo className="w-4 h-4 text-primary" />
+              <span>任务进度</span>
+            </div>
+            {todoProgress && (
+              <span className="text-xs text-muted-foreground">
+                {todoProgress.completed}/{todoProgress.total} ({todoProgress.percentage}%)
+              </span>
+            )}
+          </div>
+          {todoProgress && (
+            <div className="w-full h-1.5 bg-muted rounded-full mb-3 overflow-hidden">
+              <div 
+                className="h-full bg-primary rounded-full transition-all duration-300"
+                style={{ width: `${todoProgress.percentage}%` }}
+              />
+            </div>
+          )}
+          <div className="space-y-1.5">
+            {effectiveTodoItems.map((item) => (
+              <div 
+                key={item.id}
+                className={cn(
+                  "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
+                  item.status === 'pending' && "bg-muted/50 text-muted-foreground border",
+                  item.status === 'in_progress' && "bg-blue-500/10 text-blue-600 border border-blue-500/20",
+                  item.status === 'completed' && "bg-green-500/10 text-green-600 line-through",
+                  item.status === 'failed' && "bg-red-500/10 text-red-600 border border-red-500/20"
+                )}
+              >
+                {item.status === 'pending' && <Circle className="w-3 h-3" />}
+                {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin" />}
+                {item.status === 'completed' && <CheckCircle2 className="w-3 h-3" />}
+                {item.status === 'failed' && <XCircle className="w-3 h-3" />}
+                <span className="flex-1">{item.content}</span>
+                {item.priority && (
+                  <span className={cn(
+                    "text-[10px] px-1 rounded",
+                    item.priority === 'high' && "bg-red-100 text-red-600",
+                    item.priority === 'medium' && "bg-yellow-100 text-yellow-600",
+                    item.priority === 'low' && "bg-gray-100 text-gray-600"
+                  )}>
+                    {item.priority}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Question - 问题展示 */}
+      {parsedContent.question && (
+        <div className="my-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+          <div className="flex items-center gap-2 mb-2 text-xs font-medium text-amber-600">
+            <HelpCircle className="w-3.5 h-3.5" />
+            <span>需要您的回答</span>
+          </div>
+          <p className="text-sm text-foreground mb-3">{parsedContent.question.question}</p>
+        </div>
+      )}
+
+      {/* Options - 选项按钮展示 */}
+      {effectiveOptions && effectiveOptions.length > 0 && onAnswerQuestion && (
+        <div className="my-3 flex flex-wrap gap-2">
+          {effectiveOptions.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => onAnswerQuestion(option.id, option.value)}
+              className="px-3 py-2 text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-lg transition-colors"
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Content - AI回复内容最后展示 */}
       <div className="prose prose-sm dark:prose-invert max-w-none">
         {isStreaming ? (
-          <StreamingContent content={content} onCopy={onCopy} copiedCode={copiedCode} />
+          <StreamingContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
         ) : (
-          <MarkdownContent content={content} onCopy={onCopy} copiedCode={copiedCode} />
+          <MarkdownContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
         )}
       </div>
     </>
@@ -863,6 +1126,7 @@ interface AIMessageProps {
   toolCalls?: ToolCallInfo[];
   fileEdits?: FileEditInfo[];
   streamingItems?: StreamingItem[];
+  todoItems?: TodoItem[];
   timestamp: number;
   isStreaming?: boolean;
   isSoloMode?: boolean;
@@ -883,7 +1147,7 @@ interface AIMessageProps {
 }
 
 const AIMessage: React.FC<AIMessageProps> = ({
-  messageId, content, thinking, toolCalls, fileEdits, streamingItems, timestamp, isStreaming, isSoloMode,
+  messageId, content, thinking, toolCalls, fileEdits, streamingItems, todoItems, timestamp, isStreaming, isSoloMode,
   onCopy, copiedCode, copiedMessageId, onCopyMessage, agentQuestions, onAnswerQuestion,
   expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall,
   elapsedTime, isRetrying, sendRetryCount, isProcessing
@@ -904,6 +1168,7 @@ const AIMessage: React.FC<AIMessageProps> = ({
       fileEdits={fileEdits}
       agentQuestions={agentQuestions}
       streamingItems={streamingItems}
+      todoItems={todoItems}
       isStreaming={isStreaming}
       onCopy={onCopy}
       copiedCode={copiedCode}
@@ -1072,6 +1337,7 @@ export const ChatPanel: React.FC = () => {
     streamingToolCalls,
     error,
     createTask,
+    createConfig,
     sendMessage,
     loadConfigs,
     loadTasks,
@@ -1114,27 +1380,25 @@ export const ChatPanel: React.FC = () => {
     const task = tasks.find((t) => t.id === activeTaskId);
     if (!task) return [];
 
-    const messages: Message[] = useMemo(() => {
-      return task.messages.map((m) => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-        thinking: m.thinking,
-        toolCalls: m.toolCalls?.map(tc => ({
-          id: tc.id,
-          toolName: tc.toolName,
-          params: tc.params,
-          status: tc.status,
-          result: tc.result,
-          error: tc.error,
-        })),
-        timestamp: m.timestamp,
-        streamingItems: m.streamingItems,
-        agentQuestions: m.agentQuestions,
-        steps: task.steps,
-        todoItems: task.todoItems,
-      }));
-    }, [task.messages]);
+    const messages: Message[] = task.messages.map((m) => ({
+      id: m.id,
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+      thinking: m.thinking,
+      toolCalls: m.toolCalls?.map(tc => ({
+        id: tc.id,
+        toolName: tc.toolName,
+        params: tc.params,
+        status: tc.status,
+        result: tc.result,
+        error: tc.error,
+      })),
+      timestamp: m.timestamp,
+      streamingItems: m.streamingItems,
+      agentQuestions: m.agentQuestions,
+      steps: task.steps,
+      todoItems: task.todoItems,
+    }));
 
     if (isProcessing && (streamingMessage || streamingThinking || streamingToolCalls.length > 0)) {
       const streamingMsg: Message = {
@@ -1365,7 +1629,8 @@ export const ChatPanel: React.FC = () => {
     if (!content) return;
 
     const config = activeConfig || configs[0];
-    if (!config) {
+    const hasAIConfig = aiConfigs && aiConfigs.length > 0;
+    if (!config && !hasAIConfig) {
       setError('请先配置 AI 设置');
       return;
     }
@@ -1533,7 +1798,7 @@ export const ChatPanel: React.FC = () => {
   };
 
   const currentEditDisplay = getCurrentEditDisplay();
-  const hasConfig = configs.length > 0;
+  const hasConfig = (aiConfigs && aiConfigs.length > 0) || configs.length > 0;
 
   // Quick action buttons
   const quickActions: QuickAction[] = [

@@ -153,6 +153,8 @@ const api = {
     maximize: () => ipcRenderer.send('window:maximize'),
     close: () => ipcRenderer.send('window:close'),
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+    reload: () => ipcRenderer.invoke('window:reload'),
+    reloadIgnoringCache: () => ipcRenderer.invoke('window:reloadIgnoringCache'),
     onMaximizeChange: (callback: (isMaximized: boolean) => void) => {
       ipcRenderer.on('window:maximizeChange', (_, isMaximized) => callback(isMaximized));
     },

@@ -1,4 +1,4 @@
-import { Settings, Code2, FolderOpen, Minus, Square, X, Maximize2, Minimize2 } from 'lucide-react';
+import { Settings, Code2, FolderOpen, Minus, Square, X, Maximize2, Minimize2, RotateCcw } from 'lucide-react';
 import { useWorkspaceStore } from '@/store/workspaceStore';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -25,6 +25,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onSettingsClick, isWindows =
 
   const handleClose = () => {
     window.electronAPI?.window?.close?.();
+  };
+
+  const handleReload = () => {
+    window.electronAPI?.window?.reload?.();
   };
 
   return (
@@ -55,6 +59,16 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onSettingsClick, isWindows =
 
       {/* Right: Actions */}
       <div className="flex items-center gap-1 no-drag-region">
+        <Button 
+          variant="ghost" 
+          size="icon" 
+          className="h-8 w-8 hover:bg-accent/80 rounded-lg"
+          onClick={handleReload}
+          title="刷新 (Cmd+R)"
+        >
+          <RotateCcw className="w-4 h-4 text-muted-foreground" />
+        </Button>
+
         <Button 
           variant="ghost" 
           size="icon" 

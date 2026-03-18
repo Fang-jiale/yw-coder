@@ -15,6 +15,10 @@ import {
 } from './agent/unifiedAgentIPC';
 import { IPC_CHANNELS, AIProviderConfig } from '../shared/types';
 
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+
 const isDev = process.argv.includes('--dev');
 
 class YWCodeRApp {
@@ -237,6 +241,14 @@ class YWCodeRApp {
 
     ipcMain.handle('window:isMaximized', async () => {
       return this.mainWindow?.isMaximized() ?? false;
+    });
+
+    ipcMain.handle('window:reload', async () => {
+      this.mainWindow?.webContents.reload();
+    });
+
+    ipcMain.handle('window:reloadIgnoringCache', async () => {
+      this.mainWindow?.webContents.reloadIgnoringCache();
     });
 
     ipcMain.handle(IPC_CHANNELS.APP_SHOW_OPEN_DIALOG, async (_, options) => {
