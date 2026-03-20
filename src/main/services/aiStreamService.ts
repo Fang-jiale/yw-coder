@@ -32,10 +32,13 @@ function initLogFile(): void {
 function fileLog(message: string): void {
   try {
     initLogFile();
+    if (!logFilePath) return;
     const timestamp = new Date().toISOString();
     const logLine = `[${timestamp}] ${message}\n`;
-    fsSync.appendFileSync(logFilePath || '', logLine);
-  } catch {}
+    fsSync.appendFileSync(logFilePath, logLine);
+  } catch (e) {
+    // 静默失败，不影响主流程
+  }
 }
 
 // 重写 console.log 同时输出到文件
@@ -47,6 +50,10 @@ console.log = (...args: any[]) => {
   originalLog.apply(console, args);
   fileLog(message);
 };
+
+// 启动时写入日志
+fileLog('=== YWCodeR 启动 ===');
+fileLog('日志系统已初始化');
 
 export interface StreamChunk {
   type: 'thinking' | 'thinking_complete' | 'content' | 'tool_call' | 'tool_result' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'todo_update' | 'agent_question';
@@ -411,8 +418,14 @@ export class AIStreamService {
     const model = this.getModel(config);
     const toolService = new AIToolService(workspacePath);
 
+    // 调试日志
+    console.log('[DEBUG] streamExecute 调用');
+    console.log('[DEBUG] model:', model);
+    console.log('[DEBUG] provider:', config.provider);
+
     // 检测模型能力
     const useFunctionCall = detectFunctionCallSupport(model, config);
+    console.log('[DEBUG] useFunctionCall:', useFunctionCall);
     const modelCapability: ModelCapability = {
       modelId: model,
       maxContextWindow: getContextLength(config),
@@ -453,7 +466,7 @@ export class AIStreamService {
     promptParts.push('你不能：');
     promptParts.push('- 执行系统命令或脚本');
     promptParts.push('- 访问外部网络资源');
-    promptParts.push('- 执行文件写入工具调用（必须使用 file 标签）');
+    promptParts.push('- 直接执行文件写入（必须使用 file 标签）');
     promptParts.push('- 使用 tool_call 或 function call 来提问（必须使用 question 标签）');
     promptParts.push('');
     
