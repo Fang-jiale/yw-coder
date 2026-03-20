@@ -182,6 +182,12 @@ class YWCodeRApp {
 
     // Terminal operations
     ipcMain.handle(IPC_CHANNELS.TERMINAL_CREATE, async (_, cwd?: string) => {
+      console.log('[Main] terminal:create called, cwd:', cwd);
+      console.log('[Main] process.execPath:', process.execPath);
+      console.log('[Main] app.getAppPath():', app.getAppPath());
+      console.log('[Main] process.env.SHELL:', process.env.SHELL);
+      console.log('[Main] process.env.HOME:', process.env.HOME);
+      
       const session = this.terminalService!.createSession(cwd);
       
       this.terminalService!.onData(session.id, (data) => {

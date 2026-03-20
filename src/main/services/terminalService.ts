@@ -12,14 +12,33 @@ export class TerminalService {
     const id = `terminal-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const shell = this.getShell();
     const homeDir = os.homedir();
-    
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-color',
-      cols: 80,
-      rows: 24,
+
+    console.log('[TerminalService] Creating terminal session:', {
+      shell,
       cwd: cwd || homeDir,
-      env: process.env as { [key: string]: string },
+      processEnvShell: process.env.SHELL,
+      homedir: homeDir,
     });
+
+    let ptyProcess: pty.IPty;
+    try {
+      ptyProcess = pty.spawn(shell, [], {
+        name: 'xterm-color',
+        cols: 80,
+        rows: 24,
+        cwd: cwd || homeDir,
+        env: process.env as { [key: string]: string },
+      });
+    } catch (error: any) {
+      console.error('[TerminalService] pty.spawn failed:', {
+        shell,
+        error: error.message,
+        code: error.code,
+        errno: error.errno,
+        syscall: error.syscall,
+      });
+      throw new Error(`Failed to create terminal: ${error.message}`);
+    }
 
     this.sessions.set(id, ptyProcess);
 
@@ -86,13 +105,14 @@ export class TerminalService {
 
   private getShell(): string {
     const platform = os.platform();
-    
+
+    console.log('[TerminalService] getShell called, platform:', platform, 'SHELL env:', process.env.SHELL);
+
     if (platform === 'win32') {
       return process.env.COMSPEC || 'cmd.exe';
     }
-    
+
     if (platform === 'darwin') {
-      // macOS: try to find available shell
       const shells = [
         process.env.SHELL,
         '/bin/zsh',
@@ -100,22 +120,23 @@ export class TerminalService {
         '/usr/local/bin/zsh',
         '/usr/local/bin/bash',
       ].filter(Boolean) as string[];
-      
+
       for (const shell of shells) {
         try {
-          // Check if shell exists using require('fs')
           const fs = require('fs');
           if (fs.existsSync(shell)) {
+            console.log('[TerminalService] Selected shell:', shell);
             return shell;
           }
         } catch {
           // Continue to next shell
         }
       }
-      
-      return '/bin/zsh'; // Default fallback
+
+      console.log('[TerminalService] No valid shell found, using fallback: /bin/zsh');
+      return '/bin/zsh';
     }
-    
+
     return process.env.SHELL || '/bin/bash';
   }
 }

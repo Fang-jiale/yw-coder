@@ -356,17 +356,32 @@ export class AIToolService {
    */
   private async writeFile(filePath: string, content: string): Promise<ToolResult> {
     const fullPath = path.join(this.workspacePath, filePath);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, content, 'utf-8');
+    try {
+      await fs.mkdir(path.dirname(fullPath), { recursive: true });
+      await fs.writeFile(fullPath, content, 'utf-8');
 
-    // 通知前端
-    this.notifyFileChange(filePath, content);
+      // 通知前端
+      this.notifyFileChange(filePath, content);
 
-    return {
-      tool: 'write_file',
-      success: true,
-      data: { file_path: filePath, bytes_written: content.length },
-    };
+      return {
+        tool: 'write_file',
+        success: true,
+        data: { file_path: filePath, bytes_written: content.length },
+      };
+    } catch (error: any) {
+      console.error(`[AIToolService] write_file failed:`, {
+        message: error?.message,
+        code: error?.code,
+        errno: error?.errno,
+        syscall: error?.syscall,
+        path: error?.path,
+      });
+      return {
+        tool: 'write_file',
+        success: false,
+        error: `文件写入失败: ${error?.message} (${error?.code || 'unknown'})`,
+      };
+    }
   }
 
   /**
@@ -374,27 +389,42 @@ export class AIToolService {
    */
   private async editFile(filePath: string, oldString: string, newString: string): Promise<ToolResult> {
     const fullPath = path.join(this.workspacePath, filePath);
-    const content = await fs.readFile(fullPath, 'utf-8');
+    try {
+      const content = await fs.readFile(fullPath, 'utf-8');
 
-    if (!content.includes(oldString)) {
+      if (!content.includes(oldString)) {
+        return {
+          tool: 'edit_file',
+          success: false,
+          error: `在文件中找不到指定的字符串: "${oldString.substring(0, 50)}..."`,
+        };
+      }
+
+      const newContent = content.replace(oldString, newString);
+      await fs.writeFile(fullPath, newContent, 'utf-8');
+
+      // 通知前端
+      this.notifyFileChange(filePath, newContent);
+
+      return {
+        tool: 'edit_file',
+        success: true,
+        data: { file_path: filePath, replacements: 1 },
+      };
+    } catch (error: any) {
+      console.error(`[AIToolService] edit_file failed:`, {
+        message: error?.message,
+        code: error?.code,
+        errno: error?.errno,
+        syscall: error?.syscall,
+        path: error?.path,
+      });
       return {
         tool: 'edit_file',
         success: false,
-        error: `在文件中找不到指定的字符串: "${oldString.substring(0, 50)}..."`,
+        error: `文件编辑失败: ${error?.message} (${error?.code || 'unknown'})`,
       };
     }
-
-    const newContent = content.replace(oldString, newString);
-    await fs.writeFile(fullPath, newContent, 'utf-8');
-
-    // 通知前端
-    this.notifyFileChange(filePath, newContent);
-
-    return {
-      tool: 'edit_file',
-      success: true,
-      data: { file_path: filePath, replacements: 1 },
-    };
   }
 
   /**

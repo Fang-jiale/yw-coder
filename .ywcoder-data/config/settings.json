@@ -1,0 +1,25 @@
+{
+  "theme": "light",
+  "fontSize": 14,
+  "fontFamily": "JetBrains Mono, Fira Code, Consolas, monospace",
+  "tabSize": 2,
+  "wordWrap": true,
+  "minimap": true,
+  "aiProvider": "openai",
+  "aiModel": "gpt-4",
+  "aiApiKey": "",
+  "language": "zh-CN",
+  "aiConfigs": [
+    {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    }
+  ],
+  "activeConfigId": "1773736009070"
+}

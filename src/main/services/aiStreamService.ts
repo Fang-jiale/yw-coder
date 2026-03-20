@@ -1,10 +1,52 @@
 import OpenAI from 'openai';
 import type { Stream } from 'openai/streaming';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
-import { AIProviderConfig } from '../../shared/types';
+import { AIProviderConfig, ModelCapability, ContextPolicy, getEffectiveContextBudget, UserContextPreference } from '../../shared/types';
 import { PREDEFINED_PROVIDERS } from './aiService';
 import { AIToolService, ToolCall, ToolResult, TOOLS, ToolName } from './aiToolService';
+
+// 文件日志功能
+let logFilePath: string = '';
+
+// 初始化日志文件路径
+function initLogFile(): void {
+  if (logFilePath) return;
+  try {
+    const { app } = require('electron');
+    const userDataPath = app.getPath('userData');
+    const logDir = path.join(userDataPath, 'logs');
+    
+    try {
+      if (!fsSync.existsSync(logDir)) {
+        fsSync.mkdirSync(logDir, { recursive: true });
+      }
+    } catch {}
+    
+    const date = new Date().toISOString().split('T')[0];
+    logFilePath = path.join(logDir, `ywcoder-${date}.log`);
+  } catch {}
+}
+
+function fileLog(message: string): void {
+  try {
+    initLogFile();
+    const timestamp = new Date().toISOString();
+    const logLine = `[${timestamp}] ${message}\n`;
+    fsSync.appendFileSync(logFilePath || '', logLine);
+  } catch {}
+}
+
+// 重写 console.log 同时输出到文件
+const originalLog = console.log;
+console.log = (...args: any[]) => {
+  const message = args.map(arg => 
+    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+  ).join(' ');
+  originalLog.apply(console, args);
+  fileLog(message);
+};
 
 export interface StreamChunk {
   type: 'thinking' | 'thinking_complete' | 'content' | 'tool_call' | 'tool_result' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'todo_update' | 'agent_question';
@@ -49,6 +91,19 @@ const DEFAULT_CONTEXT_LENGTH = 4000;
 const SYSTEM_PROMPT_RESERVE = 1000;
 // 工具结果预留长度
 const TOOL_RESULT_RESERVE = 2000;
+
+// 默认模型能力配置 (32KB)
+const DEFAULT_MODEL_CAPABILITY: ModelCapability = {
+  modelId: 'default',
+  maxContextWindow: 32768,
+};
+
+// 默认上下文策略 (固定 32KB)
+const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+  defaultBudget: 32768,
+  maxAllowedBudget: 32768,
+  mode: 'conservative',
+};
 
 /**
  * 检查模型是否支持 Function Call
@@ -121,6 +176,10 @@ function trimHistoryMessages(
   let currentTokens = 0;
   const trimmedMessages: Message[] = [];
 
+  // 临时调试日志 - 验证裁剪策略
+  console.log('[DEBUG] trimHistoryMessages - 输入消息数:', messages.length);
+  console.log('[DEBUG] trimHistoryMessages - maxTokens:', maxTokens, 'availableTokens:', availableTokens);
+
   // 从后往前遍历，保留最近的消息
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -128,6 +187,7 @@ function trimHistoryMessages(
 
     if (currentTokens + msgTokens > availableTokens) {
       // 如果超出限制，停止添加
+      console.log('[DEBUG] trimHistoryMessages - 裁剪停止于第', i, '条消息, 当前累积:', currentTokens, '新消息:', msgTokens, '超出限制');
       break;
     }
 
@@ -135,6 +195,7 @@ function trimHistoryMessages(
     currentTokens += msgTokens;
   }
 
+  console.log('[DEBUG] trimHistoryMessages - 输出消息数:', trimmedMessages.length, '总tokens:', currentTokens);
   return trimmedMessages;
 }
 
@@ -237,7 +298,7 @@ export class AIStreamService {
    */
   private filterToolCalls(content: string): string {
     if (!content) return '';
-    
+
     return content
       // 过滤各种工具调用标签（包括带属性的变体）
       .replace(/<tool[\s\S]*?<\/tool>/g, '')
@@ -256,6 +317,8 @@ export class AIStreamService {
       .replace(/<todo>[\s\S]*?<\/todo>/g, '')
       // 过滤 task 标签
       .replace(/<task\s+[^>]*>[\s\S]*?<\/task>/g, '')
+      // 过滤思考标签（兜底过滤，防止状态机处理失败时暴露）
+      .replace(/<think>[\s\S]*?<\/think>/g, '')
       // 过滤可能未闭合的标签开头
       .replace(/<\/?tool[^>]*$/g, '')
       .replace(/<\/?tool_call[^>]*$/g, '')
@@ -266,6 +329,7 @@ export class AIStreamService {
       .replace(/<\/?option[^>]*$/g, '')
       .replace(/<\/?todo[^>]*$/g, '')
       .replace(/<\/?task[^>]*$/g, '')
+      .replace(/<\/?think[^>]*$/g, '')
       // 过滤 JSON 代码块
       .replace(/```json\s*[\s\S]*?```/g, '')
       // 清理多余空行
@@ -340,6 +404,7 @@ export class AIStreamService {
       openFilePaths?: string[];
       selection?: { filePath: string; code: string; startLine: number; endLine: number; language: string };
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+      userPreference?: UserContextPreference;
     }
   ): Promise<void> {
     const client = this.getClient(config);
@@ -348,8 +413,21 @@ export class AIStreamService {
 
     // 检测模型能力
     const useFunctionCall = detectFunctionCallSupport(model, config);
-    const contextLength = getContextLength(config);
+    const modelCapability: ModelCapability = {
+      modelId: model,
+      maxContextWindow: getContextLength(config),
+    };
+    const userPreference: UserContextPreference = context?.userPreference || {};
+    const effectiveContextBudget = getEffectiveContextBudget(userPreference, DEFAULT_CONTEXT_POLICY, modelCapability);
+    const contextLength = effectiveContextBudget;
     const maxTokens = config.maxTokens || 4000;
+
+    // 临时调试日志 - 验证上下文预算计算
+    console.log('[DEBUG] ========== 上下文预算验证 ==========');
+    console.log('[DEBUG] modelCapability:', JSON.stringify(modelCapability));
+    console.log('[DEBUG] userPreference:', JSON.stringify(userPreference));
+    console.log('[DEBUG] effectiveContextBudget:', effectiveContextBudget, '(bytes)', effectiveContextBudget / 1024, 'KB');
+    console.log('[DEBUG] ======================================');
 
     // 构建基础系统提示词 - 参考业内最佳实践
     // 使用数组拼接避免 TypeScript 解析问题
@@ -459,197 +537,44 @@ export class AIStreamService {
     promptParts.push('使用 <think> 标签展示你的思考过程，帮助用户理解你的决策逻辑。');
     promptParts.push('');
     
-    // 8. Few-shot 示例
+    // 8. 输出长度控制（关键约束）
+    promptParts.push('## 输出长度控制');
+    promptParts.push('');
+    promptParts.push('【关键】AI 输出受限于上下文窗口，必须控制每次输出的长度：');
+    promptParts.push('');
+    promptParts.push('1. **文件写入限制**：');
+    promptParts.push('   - 单次 <file> 标签内容不超过 500 行');
+    promptParts.push('   - 如果预估代码超过 500 行，先写核心部分，用 <question> 询问后续');
+    promptParts.push('');
+    promptParts.push('2. **保持 JSON 格式完整**：');
+    promptParts.push('   - 所有字符串必须正确闭合（使用单引号或双引号）');
+    promptParts.push('   - 检查 <file> 标签的 path 属性是否正确闭合');
+    promptParts.push('   - 避免在字符串中间截断');
+    promptParts.push('');
+    promptParts.push('3. **分步执行**：');
+    promptParts.push('   - 复杂任务分多次完成');
+    promptParts.push('   - 每次只写一个文件或一个模块');
+    promptParts.push('   - 用 todo 标签标记未完成的部分');
+    promptParts.push('');
+    
+    // 9. 精简示例
     promptParts.push('## 示例');
     promptParts.push('');
-    promptParts.push('### 示例 1：创建新功能');
-    promptParts.push('');
-    promptParts.push('用户：帮我创建一个用户登录功能');
-    promptParts.push('');
-    promptParts.push('你的响应：');
-    promptParts.push('<think>');
-    promptParts.push('用户需要创建一个用户登录功能。我需要：');
-    promptParts.push('1. 先了解项目使用的技术栈');
-    promptParts.push('2. 查看是否已有用户相关的代码');
-    promptParts.push('3. 设计登录功能的实现方案');
-    promptParts.push('</think>');
+    promptParts.push('用户：创建登录功能');
     promptParts.push('');
     promptParts.push('<todo>');
-    promptParts.push('<task id="1" status="in_progress">分析项目技术栈和现有代码</task>');
-    promptParts.push('<task id="2" status="pending">设计登录功能方案</task>');
-    promptParts.push('<task id="3" status="pending">实现登录功能</task>');
+    promptParts.push('<task id="1" status="in_progress">分析项目技术栈</task>');
+    promptParts.push('<task id="2" status="pending">实现登录模块</task>');
     promptParts.push('</todo>');
     promptParts.push('');
-    promptParts.push('<question>');
-    promptParts.push('你希望使用什么技术栈实现登录功能？例如：');
-    promptParts.push('- JWT + 本地存储');
-    promptParts.push('- Session + Cookie');
-    promptParts.push('- OAuth 第三方登录');
-    promptParts.push('</question>');
+    promptParts.push('<question>你希望使用什么技术栈？JWT/Session/OAuth</question>');
     promptParts.push('');
-    
-    // 9. 错误处理
-    promptParts.push('## 错误处理');
-    promptParts.push('');
-    promptParts.push('当遇到错误时：');
-    promptParts.push('');
-    promptParts.push('1. **不要慌张**：冷静分析错误信息');
-    promptParts.push('2. **定位问题**：确定错误发生的位置和原因');
-    promptParts.push('3. **提供解决方案**：给出具体的修复步骤');
-    promptParts.push('4. **预防建议**：说明如何避免类似错误');
-    promptParts.push('');
-    promptParts.push('如果错误无法解决，诚实地告诉用户，并提供替代方案。');
-    promptParts.push('');
-    
-    // 10. 上下文管理
-    promptParts.push('## 上下文管理');
-    promptParts.push('');
-    promptParts.push('为了高效利用上下文窗口：');
-    promptParts.push('');
-    promptParts.push('- 优先读取关键文件，避免一次性读取过多内容');
-    promptParts.push('- 使用搜索工具快速定位相关代码');
-    promptParts.push('- 如果文件太大，先读取关键部分，需要时再读取其他部分');
-    promptParts.push('- 及时总结已读取的信息，避免重复读取');
-    promptParts.push('');
-    
-    // 11. 最佳实践
     promptParts.push('## 最佳实践');
     promptParts.push('');
-    promptParts.push('### 代码质量');
-    promptParts.push('- 编写清晰、可维护的代码');
-    promptParts.push('- 添加必要的注释，特别是复杂的逻辑');
-    promptParts.push('- 遵循项目已有的代码风格和规范');
-    promptParts.push('- 考虑边界情况和错误处理');
-    promptParts.push('');
-    promptParts.push('### 沟通方式');
+    promptParts.push('- 复杂任务先规划再执行');
+    promptParts.push('- 保持代码清晰、可维护');
     promptParts.push('- 使用中文与用户交流');
-    promptParts.push('- 解释技术决策的原因，不只是做什么');
-    promptParts.push('- 提供多种方案时，说明各自的优缺点');
-    promptParts.push('- 主动确认理解是否正确');
-    promptParts.push('');
-    promptParts.push('### 任务管理');
-    promptParts.push('- 复杂任务先规划，再执行');
-    promptParts.push('- 频繁更新 todo 状态，让用户了解进展');
-    promptParts.push('- 遇到阻碍及时反馈，不要长时间无响应');
-    promptParts.push('- 完成时简要总结做了什么');
-    promptParts.push('');
-    
-    // 12. 工具使用策略
-    promptParts.push('## 工具使用策略');
-    promptParts.push('');
-    promptParts.push('### 何时使用搜索');
-    promptParts.push('- 需要了解项目整体结构时');
-    promptParts.push('- 查找特定功能或代码片段时');
-    promptParts.push('- 不确定文件位置时');
-    promptParts.push('- 需要查找相关依赖或配置时');
-    promptParts.push('');
-    promptParts.push('### 何时读取文件');
-    promptParts.push('- 需要理解具体实现逻辑时');
-    promptParts.push('- 需要修改或参考现有代码时');
-    promptParts.push('- 需要查看配置文件内容时');
-    promptParts.push('- 搜索结果显示相关文件后');
-    promptParts.push('');
-    promptParts.push('### 工具组合使用');
-    promptParts.push('1. 先搜索定位 → 2. 读取关键文件 → 3. 分析理解 → 4. 执行修改');
-    promptParts.push('避免：不搜索直接读取大量文件，或反复读取同一文件');
-    promptParts.push('');
-    
-    // 13. 代码审查指导
-    promptParts.push('## 代码审查指导');
-    promptParts.push('');
-    promptParts.push('当审查代码时，关注以下方面：');
-    promptParts.push('');
-    promptParts.push('### 功能性');
-    promptParts.push('- 代码是否正确实现了需求？');
-    promptParts.push('- 是否处理了边界情况？');
-    promptParts.push('- 是否有潜在的 Bug？');
-    promptParts.push('');
-    promptParts.push('### 可读性');
-    promptParts.push('- 命名是否清晰有意义？');
-    promptParts.push('- 函数是否过长？是否需要拆分？');
-    promptParts.push('- 注释是否充分说明了复杂逻辑？');
-    promptParts.push('');
-    promptParts.push('### 可维护性');
-    promptParts.push('- 代码是否遵循单一职责原则？');
-    promptParts.push('- 是否有重复代码需要提取？');
-    promptParts.push('- 依赖关系是否清晰？');
-    promptParts.push('');
-    promptParts.push('### 性能');
-    promptParts.push('- 是否有明显的性能瓶颈？');
-    promptParts.push('- 是否有不必要的计算或渲染？');
-    promptParts.push('- 数据结构选择是否合理？');
-    promptParts.push('');
-    
-    // 14. 安全最佳实践
-    promptParts.push('## 安全最佳实践');
-    promptParts.push('');
-    promptParts.push('编写代码时，始终考虑安全性：');
-    promptParts.push('');
-    promptParts.push('### 输入验证');
-    promptParts.push('- 永远不要信任用户输入');
-    promptParts.push('- 对所有输入进行验证和清理');
-    promptParts.push('- 使用参数化查询防止 SQL 注入');
-    promptParts.push('');
-    promptParts.push('### 敏感数据');
-    promptParts.push('- 不要将密码、密钥等硬编码在代码中');
-    promptParts.push('- 使用环境变量或安全的密钥管理系统');
-    promptParts.push('- 日志中不要输出敏感信息');
-    promptParts.push('');
-    promptParts.push('### 常见漏洞防护');
-    promptParts.push('- XSS：对用户输入进行转义');
-    promptParts.push('- CSRF：使用 CSRF Token');
-    promptParts.push('- 路径遍历：验证文件路径');
-    promptParts.push('');
-    
-    // 15. 性能优化
-    promptParts.push('## 性能优化');
-    promptParts.push('');
-    promptParts.push('### 前端性能');
-    promptParts.push('- 避免不必要的重渲染');
-    promptParts.push('- 图片懒加载和压缩');
-    promptParts.push('- 代码分割，按需加载');
-    promptParts.push('- 使用缓存策略');
-    promptParts.push('');
-    promptParts.push('### 后端性能');
-    promptParts.push('- 数据库查询优化，添加索引');
-    promptParts.push('- 使用缓存减少重复计算');
-    promptParts.push('- 异步处理耗时操作');
-    promptParts.push('- 避免 N+1 查询问题');
-    promptParts.push('');
-    promptParts.push('### 算法优化');
-    promptParts.push('- 选择合适的数据结构');
-    promptParts.push('- 关注时间复杂度和空间复杂度');
-    promptParts.push('- 对于大数据量，考虑分批处理');
-    promptParts.push('');
-    
-    // 16. 更多示例
-    promptParts.push('## 更多示例');
-    promptParts.push('');
-    promptParts.push('### 示例 3：代码重构');
-    promptParts.push('');
-    promptParts.push('用户：这段代码太乱了，帮我重构一下');
-    promptParts.push('（用户提供了代码片段）');
-    promptParts.push('');
-    promptParts.push('你的响应：');
-    promptParts.push('<think>');
-    promptParts.push('这段代码存在以下问题：');
-    promptParts.push('1. 函数过长，职责不单一');
-    promptParts.push('2. 变量命名不清晰');
-    promptParts.push('3. 有重复代码可以提取');
-    promptParts.push('4. 缺少错误处理');
-    promptParts.push('重构方案：');
-    promptParts.push('- 将大函数拆分为多个小函数');
-    promptParts.push('- 使用有意义的变量名');
-    promptParts.push('- 提取重复逻辑为工具函数');
-    promptParts.push('- 添加适当的错误处理');
-    promptParts.push('</think>');
-    promptParts.push('');
-    promptParts.push('<todo>');
-    promptParts.push('<task id="1" status="in_progress">分析代码问题</task>');
-    promptParts.push('<task id="2" status="pending">拆分大函数</task>');
-    promptParts.push('<task id="3" status="pending">优化变量命名</task>');
-    promptParts.push('<task id="4" status="pending">提取重复代码</task>');
-    promptParts.push('</todo>');
+    promptParts.push('- 遇到问题及时反馈');
     promptParts.push('');
     promptParts.push('我发现了以下问题并提供重构方案...');
     promptParts.push('（然后输出重构后的代码）');
@@ -757,6 +682,16 @@ export class AIStreamService {
           ...messages,
         ];
 
+        // ========== 调试日志：发送请求消息信息 ==========
+        console.log(`[DEBUG] ======= 请求 #${roundCount} =======`);
+        console.log(`[DEBUG] 消息总数: ${requestMessages.length}`);
+        requestMessages.forEach((msg, idx) => {
+          const contentLen = msg.content ? msg.content.length : 0;
+          const contentPreview = msg.content ? msg.content.slice(0, 100).replace(/\n/g, '\\n') : '(null)';
+          console.log(`[DEBUG] 消息[${idx}] role=${msg.role}, length=${contentLen}, preview="${contentPreview}..."`);
+        });
+        console.log(`[DEBUG] ==========================================`);
+
         const requestParams: any = {
           model,
           messages: requestMessages,
@@ -773,6 +708,7 @@ export class AIStreamService {
 
         // 如果支持 Function Call，添加工具定义
         if (useFunctionCall) {
+          console.log('[DEBUG] Function Call 已启用，工具数量:', TOOLS.length);
           requestParams.tools = TOOLS.map(tool => ({
             type: 'function' as const,
             function: {
@@ -782,6 +718,8 @@ export class AIStreamService {
             },
           }));
           requestParams.tool_choice = 'auto';
+        } else {
+          console.log('[DEBUG] Function Call 未启用');
         }
 
 
@@ -972,22 +910,35 @@ export class AIStreamService {
                     // 写入文件
                     const fullPath = path.join(workspacePath, fileEditPath);
                     console.log(`[AIStreamService] Writing file: ${fullPath}`);
+                    
+                    let writeSuccess = false;
+                    let writeError: Error | null = null;
+                    
                     try {
                       await fs.mkdir(path.dirname(fullPath), { recursive: true });
                       await fs.writeFile(fullPath, fileEditContent, 'utf-8');
                       console.log(`[AIStreamService] File written successfully: ${fullPath}`);
-                    } catch (error) {
-                      console.error(`[AIStreamService] Failed to write file: ${fullPath}`, error);
-                    }
+                      writeSuccess = true;
+                    } catch (error: any) {
+                        writeError = error as Error;
+                        console.error(`[AIStreamService] Failed to write file: ${fullPath}`, {
+                          message: writeError?.message,
+                          code: error?.code,
+                          errno: error?.errno,
+                          syscall: error?.syscall,
+                          path: error?.path,
+                        });
+                      }
 
-                    // 发送 tool_end 回调，标记文件操作完成
+                    // 发送 tool_end 回调，根据实际结果返回状态
                     callback({
                       type: 'tool_end',
                       toolName: 'edit_file' as ToolName,
                       toolResult: {
                         tool: 'edit_file' as ToolName,
-                        success: true,
-                        data: { file_path: fileEditPath },
+                        success: writeSuccess,
+                        error: writeError ? `文件写入失败: ${writeError.message} (${(writeError as any).code || 'unknown'})` : undefined,
+                        data: writeSuccess ? { file_path: fileEditPath } : undefined,
                       },
                       toolCallId: fileEditToolCallId,
                     });
@@ -1266,22 +1217,35 @@ export class AIStreamService {
             // 写入文件
             const fullPath = path.join(workspacePath, fileEditPath);
             console.log(`[AIStreamService] Writing file (forced): ${fullPath}, content length: ${fileEditContent.length}`);
+            
+            let writeSuccess = false;
+            let writeError: Error | null = null;
+            
             try {
               await fs.mkdir(path.dirname(fullPath), { recursive: true });
               await fs.writeFile(fullPath, fileEditContent, 'utf-8');
               console.log(`[AIStreamService] File written successfully (forced): ${fullPath}`);
-            } catch (error) {
-              console.error(`[AIStreamService] Failed to write file (forced): ${fullPath}`, error);
+              writeSuccess = true;
+            } catch (error: any) {
+              writeError = error as Error;
+              console.error(`[AIStreamService] Failed to write file (forced): ${fullPath}`, {
+                message: writeError?.message,
+                code: error?.code,
+                errno: error?.errno,
+                syscall: error?.syscall,
+                path: error?.path,
+              });
             }
             
-            // 发送 tool_end 回调
+            // 发送 tool_end 回调，根据实际结果返回状态
             callback({
               type: 'tool_end',
               toolName: 'edit_file' as ToolName,
               toolResult: {
                 tool: 'edit_file' as ToolName,
-                success: true,
-                data: { file_path: fileEditPath },
+                success: writeSuccess,
+                error: writeError ? `文件写入失败: ${writeError.message} (${(writeError as any).code || 'unknown'})` : undefined,
+                data: writeSuccess ? { file_path: fileEditPath } : undefined,
               },
               toolCallId: fileEditToolCallId,
             });
@@ -1320,6 +1284,11 @@ export class AIStreamService {
               });
             } catch (e) {
               console.error('解析 function call 参数失败:', e);
+              // ========== 调试日志：打印原始 arguments ==========
+              console.error('[DEBUG] 解析失败的原始 arguments:', toolCall.function.arguments);
+              console.error('[DEBUG] arguments 长度:', toolCall.function.arguments?.length);
+              console.error('[DEBUG] arguments 最后 200 字符:', toolCall.function.arguments?.slice(-200));
+              // ===================================================
             }
           }
         }

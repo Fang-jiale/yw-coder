@@ -1,0 +1,456 @@
+[
+  {
+    "id": "agent-1773736150306-1xajge9ha",
+    "name": "SOLO",
+    "description": "Default solo mode configuration",
+    "runtimeMode": "solo",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": true,
+      "askBeforeExecute": false,
+      "autoFixErrors": true,
+      "maxAutoRetries": 5,
+      "showThinking": true,
+      "enableTodoList": true,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_files",
+        "search",
+        "terminal"
+      ],
+      "maxContextMessages": 30,
+      "canEditFiles": true,
+      "canExecuteCommands": true,
+      "canRefactorCode": true
+    },
+    "systemPrompt": "You are SOLO Agent, an autonomous AI developer that can independently complete development tasks from requirements to deployment.\n\nYour capabilities:\n1. Analyze project structure and requirements\n2. Create detailed development plans\n3. Write complete, production-ready code\n4. Execute tests and verify functionality\n5. Handle errors and retry automatically\n\nGuidelines:\n1. Be proactive and autonomous\n2. Use tools efficiently\n3. Follow existing code conventions\n4. Provide progress updates\n5. Handle errors gracefully",
+    "isDefault": false,
+    "createdAt": 1773736150306,
+    "updatedAt": 1773736150306
+  },
+  {
+    "id": "agent-1773736152002-aqe24c1e9",
+    "name": "对话",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": true,
+    "createdAt": 1773736152002,
+    "updatedAt": 1773736152002
+  },
+  {
+    "id": "agent-1773750974035-wi4w1ymyr",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773750974035,
+    "updatedAt": 1773750974035
+  },
+  {
+    "id": "agent-1773750974037-sbnpbr5ah",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773750974037,
+    "updatedAt": 1773750974037
+  },
+  {
+    "id": "agent-1773752075054-8mmyt7v3s",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773752075054,
+    "updatedAt": 1773752075054
+  },
+  {
+    "id": "agent-1773752075056-q3cjiowed",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773752075056,
+    "updatedAt": 1773752075056
+  },
+  {
+    "id": "agent-1773752075145-hbcws44h0",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773752075145,
+    "updatedAt": 1773752075145
+  },
+  {
+    "id": "agent-1773754274206-q36y7ecso",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773754274206,
+    "updatedAt": 1773754274206
+  },
+  {
+    "id": "agent-1773757576235-s9l62kmw5",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773757576235,
+    "updatedAt": 1773757576235
+  },
+  {
+    "id": "agent-1773757576237-zcoacfo57",
+    "name": "deepseek-v3.2",
+    "description": "Default chat mode configuration",
+    "runtimeMode": "chat",
+    "aiConfig": {
+      "id": "1773736009070",
+      "name": "deepseek-v3.2",
+      "provider": "deepseek",
+      "apiKey": "sk-5f3843dcd8b64014b2dffb17ebf3a7b8",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "isDefault": true,
+      "groupId": ""
+    },
+    "behavior": {
+      "autoExecuteTools": false,
+      "askBeforeExecute": true,
+      "autoFixErrors": false,
+      "maxAutoRetries": 0,
+      "showThinking": false,
+      "enableTodoList": false,
+      "enableDiffPreview": true,
+      "commandWhitelist": [
+        "npm install",
+        "npm run build",
+        "npm test",
+        "pip install"
+      ]
+    },
+    "capabilities": {
+      "enabledTools": [
+        "read_file",
+        "search"
+      ],
+      "maxContextMessages": 10,
+      "canEditFiles": false,
+      "canExecuteCommands": false,
+      "canRefactorCode": false
+    },
+    "systemPrompt": "You are an AI coding assistant. Help users with their coding questions and tasks.\n\nGuidelines:\n1. Provide clear, concise answers\n2. Use code blocks with appropriate language tags\n3. Explain your reasoning when helpful\n4. Ask clarifying questions when needed",
+    "isDefault": false,
+    "createdAt": 1773757576237,
+    "updatedAt": 1773757576237
+  }
+]

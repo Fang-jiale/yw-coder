@@ -1,7 +1,7 @@
 {
   "name": "ywcoder",
   "version": "1.0.2",
-  "description": "AI-powered coding IDE similar to Trae",
+  "description": "YWCoder AI Coding Tool",
   "main": "dist/main/index.js",
   "type": "commonjs",
   "author": "YWCodeR Team",

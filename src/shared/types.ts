@@ -196,6 +196,42 @@ export interface SearchResult {
   }>;
 }
 
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
+
+export type ResultCardType = 'file_create' | 'file_edit' | 'file_delete' | 'command_execute' | 'env_check';
+
+export interface ResultCard {
+  id: string;
+  type: ResultCardType;
+  title: string;
+  status: 'success' | 'error' | 'pending';
+  description: string;
+  timestamp: number;
+}
+
+export interface FileResultCard extends ResultCard {
+  type: 'file_create' | 'file_edit' | 'file_delete';
+  filePath: string;
+  operation: 'create' | 'edit' | 'delete';
+  newContent?: string;
+  oldContent?: string;
+}
+
+export interface CommandResultCard extends ResultCard {
+  type: 'command_execute';
+  command: string;
+  exitCode?: number;
+  output?: string;
+  outputSummary?: string;
+}
+
+export interface EnvCheckResultCard extends ResultCard {
+  type: 'env_check';
+  checkItem: string;
+  detectedValue?: string;
+  expectedValue?: string;
+}
+
 export const IPC_CHANNELS = {
   // File operations
   FILE_READ: 'file:read',
@@ -296,3 +332,133 @@ export const IPC_CHANNELS = {
   UNIFIED_EVENT_PLAN_GENERATED: 'agent:event:plan-generated',
   UNIFIED_EVENT_PROGRESS_UPDATE: 'agent:event:progress-update',
 } as const;
+
+// 消息解析辅助函数
+export interface ParsedMessage {
+  rawContent: string;
+  visibleContent: string;
+  thinkingContent: string;
+  todoItems: string[];
+  taskItems: string[];
+}
+
+const TAIL_TAG_PATTERNS = [
+  /<thi$/i, /<thin$/i, /<think$/i,
+  /<todo$/i, /<tod$/i, /<to$/i, /<t$/i,
+  /<tas$/i, /<task$/i, /<tas$/i,
+  /<\/thi$/i, /<\/think$/i,
+  /<thi[^>]*$/i, /<todo[^>]*$/i, /<task[^>]*$/i,
+];
+
+function protectTailTags(content: string): string {
+  for (const pattern of TAIL_TAG_PATTERNS) {
+    if (pattern.test(content)) {
+      const lastIndex = content.search(pattern);
+      return content.slice(0, lastIndex);
+    }
+  }
+  return content;
+}
+
+export function parseMessageContent(rawContent: string): ParsedMessage {
+  let content = rawContent;
+  let thinkingContent = '';
+  let todoItems: string[] = [];
+  let taskItems: string[] = [];
+
+  // 检查是否存在未闭合的标签
+  const hasUnclosedThink = /<think>[^<]*$/.test(content) && !content.includes('</think>');
+  const hasUnclosedTodo = /<todo>[^<]*$/.test(content) && !content.includes('</todo>');
+  const hasUnclosedTask = /<task[^>]*>[^<]*$/.test(content) && !content.includes('</task>');
+
+  // 如果有未闭合标签，从该标签位置截断
+  if (hasUnclosedThink || hasUnclosedTodo || hasUnclosedTask) {
+    const thinkStart = content.lastIndexOf('<think>');
+    const todoStart = content.lastIndexOf('<todo>');
+    const taskStart = content.lastIndexOf('<task');
+
+    let truncatePos = content.length;
+    if (hasUnclosedThink && thinkStart > -1) {
+      truncatePos = Math.min(truncatePos, thinkStart);
+    }
+    if (hasUnclosedTodo && todoStart > -1) {
+      truncatePos = Math.min(truncatePos, todoStart);
+    }
+    if (hasUnclosedTask && taskStart > -1) {
+      truncatePos = Math.min(truncatePos, taskStart);
+    }
+    content = content.slice(0, truncatePos);
+  }
+
+  // 提取思考内容（完整闭合标签）
+  const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+  if (thinkMatch) {
+    thinkingContent = thinkMatch[1].trim();
+    content = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+
+  // 提取 todo 标签
+  const todoRegex = /<todo>([\s\S]*?)<\/todo>/g;
+  let todoMatch;
+  while ((todoMatch = todoRegex.exec(content)) !== null) {
+    todoItems.push(todoMatch[1].trim());
+  }
+  content = content.replace(/<todo>[\s\S]*?<\/todo>/g, '').trim();
+
+  // 提取 task 标签
+  const taskRegex = /<task[^>]*>([\s\S]*?)<\/task>/g;
+  let taskMatch;
+  while ((taskMatch = taskRegex.exec(content)) !== null) {
+    taskItems.push(taskMatch[1].trim());
+  }
+  content = content.replace(/<task[^>]*>[\s\S]*?<\/task>/g, '').trim();
+
+  // 尾部半截标签保护
+  content = protectTailTags(content);
+
+  return {
+    rawContent,
+    visibleContent: content.trim(),
+    thinkingContent,
+    todoItems,
+    taskItems,
+  };
+}
+
+export function removeSpecialTags(content: string): string {
+  return content
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/<todo>[\s\S]*?<\/todo>/g, '')
+    .replace(/<task[^>]*>[\s\S]*?<\/task>/g, '')
+    .trim();
+}
+
+export type ContextMode = 'conservative';
+
+export interface ModelCapability {
+  modelId: string;
+  maxContextWindow: number;
+}
+
+export interface ContextPolicy {
+  defaultBudget: number;
+  maxAllowedBudget: number;
+  mode: ContextMode;
+}
+
+export interface UserContextPreference {
+  preferredBudget?: number;
+  mode?: ContextMode;
+}
+
+export function getEffectiveContextBudget(
+  userPreference: UserContextPreference,
+  contextPolicy: ContextPolicy,
+  modelCapability: ModelCapability
+): number {
+  return Math.min(
+    userPreference.preferredBudget ?? contextPolicy.defaultBudget,
+    contextPolicy.maxAllowedBudget,
+    modelCapability.maxContextWindow
+  );
+}

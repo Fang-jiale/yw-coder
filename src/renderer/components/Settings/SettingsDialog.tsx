@@ -180,6 +180,18 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
               </div>
             </div>
 
+            {/* Context Budget - 上下文限制 */}
+            <div className="space-y-3">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <Bot className="w-4 h-4" />
+                上下文限制
+              </label>
+              <div className="flex items-center gap-2 px-4 py-2 rounded-md border border-primary bg-primary/10 text-primary w-fit">
+                32KB
+              </div>
+              <p className="text-xs text-muted-foreground">当前上下文窗口限制为 32KB，更多选项即将推出</p>
+            </div>
+
             {/* Font Family */}
             <div className="space-y-3">
               <label className="text-sm font-medium flex items-center gap-2">

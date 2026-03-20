@@ -20,7 +20,8 @@ import {
   ExecutionPlanStep,
   AgentQuestion,
 } from '../../shared/agentTypes';
-import { AIProviderConfig } from '../../shared/types';
+import { AIProviderConfig, parseMessageContent, removeSpecialTags } from '../../shared/types';
+import type { TaskStatus, ResultCard, FileResultCard, CommandResultCard, EnvCheckResultCard } from '../../shared/types';
 
 // 调试模式开关
 const DEBUG = typeof process !== 'undefined' && (process.env?.DEBUG === 'true' || process.env?.NODE_ENV === 'development');
@@ -70,6 +71,8 @@ interface UnifiedAgentState {
   isProcessing: boolean;
   // 当前流式消息
   streamingMessage: string;
+  // 可见的流式消息（解析后去除特殊标签）
+  visibleStreamingMessage: string;
   // 当前思考内容
   streamingThinking: string;
   // 当前流式工具调用
@@ -86,6 +89,22 @@ interface UnifiedAgentState {
   agentContext: AgentContext | null;
   isExecuting: boolean;
   isPaused: boolean;
+
+  // 新增：任务进度状态（基于真实 runtime）
+  taskProgress: {
+    status: TaskStatus;
+    currentPhase: string;
+    currentStep: number;
+    totalSteps: number;
+    message: string;
+  } | null;
+
+  // 新增：结果卡片列表
+  resultCards: ResultCard[];
+
+  // 新增：折叠状态
+  collapsedThinking: boolean;
+  collapsedToolCalls: boolean;
 }
 
 interface UnifiedAgentActions {
@@ -123,6 +142,7 @@ interface UnifiedAgentActions {
   // 流式状态
   setStreamingMessage: (message: string) => void;
   appendStreamingMessage: (content: string) => void;
+  updateVisibleStreamingMessage: (content: string) => void;
   setStreamingThinking: (thinking: string) => void;
   appendStreamingThinking: (content: string) => void;
   addStreamingToolCall: (toolCall: AgentToolCall) => void;
@@ -134,6 +154,14 @@ interface UnifiedAgentActions {
   // 错误处理
   setError: (error: string | null) => void;
   clearError: () => void;
+
+  // 新增：任务进度管理
+  updateTaskProgress: (progress: UnifiedAgentState['taskProgress']) => void;
+  addResultCard: (card: ResultCard) => void;
+  clearResultCards: () => void;
+  toggleCollapsedThinking: () => void;
+  toggleCollapsedToolCalls: () => void;
+  updateTaskStatusFromRuntime: (status: TaskStatus, message?: string) => void;
 }
 
 export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActions>()(
@@ -148,6 +176,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         isCreating: false,
         isProcessing: false,
         streamingMessage: '',
+        visibleStreamingMessage: '',
         streamingThinking: '',
         streamingToolCalls: [],
         todoItems: [],
@@ -160,6 +189,12 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         agentContext: null,
         isExecuting: false,
         isPaused: false,
+
+        // 新增状态
+        taskProgress: null,
+        resultCards: [],
+        collapsedThinking: true,
+        collapsedToolCalls: true,
 
         // 配置管理
         createConfig: async (runtimeMode, aiConfig, name) => {
@@ -535,10 +570,10 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
           set((state) => {
             const task = state.tasks.find((t) => t.id === taskId);
             if (task) {
-              // 更新最后一条AI消息的思考内容
               const lastMessage = task.messages[task.messages.length - 1];
               if (lastMessage && lastMessage.role === 'assistant') {
                 lastMessage.thinking = thinking;
+                lastMessage.content = removeSpecialTags(lastMessage.content);
               }
             }
           });
@@ -595,8 +630,14 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
 
         appendStreamingMessage: (content) => {
           set((state) => {
-            state.streamingMessage += content;
+            const raw = state.streamingMessage + content;
+            const parsed = parseMessageContent(raw);
+            state.streamingMessage = parsed.visibleContent;
           });
+        },
+
+        updateVisibleStreamingMessage: (content: string) => {
+          set({ visibleStreamingMessage: content });
         },
 
         setStreamingThinking: (thinking) => {
@@ -653,6 +694,42 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
 
         clearError: () => {
           set({ error: null });
+        },
+
+        // 新增：任务进度管理
+        updateTaskProgress: (progress) => {
+          set({ taskProgress: progress });
+        },
+
+        addResultCard: (card) => {
+          set((state) => ({ resultCards: [...state.resultCards, card] }));
+        },
+
+        clearResultCards: () => {
+          set({ resultCards: [] });
+        },
+
+        toggleCollapsedThinking: () => {
+          set((state) => ({ collapsedThinking: !state.collapsedThinking }));
+        },
+
+        toggleCollapsedToolCalls: () => {
+          set((state) => ({ collapsedToolCalls: !state.collapsedToolCalls }));
+        },
+
+        updateTaskStatusFromRuntime: (status, message) => {
+          set((state) => {
+            if (state.taskProgress) {
+              return {
+                taskProgress: {
+                  ...state.taskProgress,
+                  status,
+                  message: message || state.taskProgress.message,
+                },
+              };
+            }
+            return state;
+          });
         },
       }))
     ),

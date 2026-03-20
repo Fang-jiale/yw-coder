@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUnifiedAgentStore, setupUnifiedAgentEventListeners } from '@/store/unifiedAgentStore';
+import { ResultCard, FileResultCard, CommandResultCard, EnvCheckResultCard } from './ResultCards/ResultCard';
 import { useWorkspaceStore } from '@/store/workspaceStore';
 import { useCodeEditorStore } from '@/store/codeEditorStore';
 import { useSettingsStore } from '@/store/settingsStore';
@@ -709,6 +710,15 @@ const MessageContent: React.FC<MessageContentProps> = ({
   content, thinking, toolCalls, fileEdits, agentQuestions, streamingItems, todoItems, isStreaming, onCopy, copiedCode,
   expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall, onAnswerQuestion, messageId
 }) => {
+  const {
+    resultCards,
+    taskProgress,
+    collapsedThinking,
+    collapsedToolCalls,
+    toggleCollapsedThinking,
+    toggleCollapsedToolCalls,
+  } = useUnifiedAgentStore();
+
   // 解析 content 中的各种标签
   const parsedContent = useMemo(() => {
     if (!content) return { thinking: null, todoItems: null, options: null, question: null, cleanedContent: '' };
@@ -823,38 +833,117 @@ const MessageContent: React.FC<MessageContentProps> = ({
   if (streamingItems && streamingItems.length > 0) {
     return (
       <>
-        {/* Thinking Process - AI思考过程最先展示 */}
+        {/* Result Cards - 结果卡片区域 */}
+        {resultCards && resultCards.length > 0 && (
+          <div className="mb-4 space-y-2">
+            {resultCards.map((card, index) => (
+              <ResultCard
+                key={`result-${index}`}
+                title={card.title}
+                status={card.status}
+                description={card.description}
+                timestamp={card.timestamp}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Task Progress - 任务进度展示（基于真实 runtime 状态） */}
+        {taskProgress && (
+          <div className="my-3 p-3 bg-muted/50 rounded-lg border">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2 text-xs font-medium">
+                <ListTodo className="w-4 h-4 text-primary" />
+                <span>任务进度</span>
+              </div>
+              {taskProgress.currentStep !== undefined && taskProgress.totalSteps !== undefined && (
+                <span className="text-xs text-muted-foreground">
+                  {taskProgress.currentStep}/{taskProgress.totalSteps}
+                </span>
+              )}
+            </div>
+            {taskProgress.totalSteps !== undefined && taskProgress.totalSteps > 0 && (
+              <div className="w-full h-1.5 bg-muted rounded-full mb-2 overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round((taskProgress.currentStep / taskProgress.totalSteps) * 100)}%` }}
+                />
+              </div>
+            )}
+            {taskProgress.message && (
+              <p className="text-xs text-muted-foreground">{taskProgress.message}</p>
+            )}
+          </div>
+        )}
+
+        {/* Tool Calls - 工具调用（默认折叠） */}
+        <div className="mb-3">
+          <button
+            onClick={toggleCollapsedToolCalls}
+            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            <span>工具调用</span>
+            <span className="text-muted-foreground/60">({streamingItems.filter(i => i.type === 'tool').length})</span>
+            <ChevronDown
+              className={cn(
+                'w-3 h-3 transition-transform duration-200 ml-auto',
+                collapsedToolCalls && 'rotate-180'
+              )}
+            />
+          </button>
+          {!collapsedToolCalls && (
+            <div className="space-y-2">
+              {streamingItems.map((item, index) => {
+                if (item.type === 'tool') {
+                  const tc = item.toolCall as ToolCallInfo | undefined;
+                  if (tc && tc.id) {
+                    return (
+                      <div key={`${tc.id}-${index}`}>
+                        <ToolCallCard
+                          toolCall={tc}
+                          isExpanded={expandedToolCalls.has(tc.id)}
+                          onToggle={() => onToggleToolCall(tc.id)}
+                        />
+                      </div>
+                    );
+                  }
+                }
+                return null;
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Thinking Process - 思考内容（默认折叠） */}
         {effectiveThinking && (
-          <ThinkingBlock
-            thinking={effectiveThinking}
-            isStreaming={isStreaming}
-            isExpanded={expandedThinkingMsgs.has(messageId)}
-            onToggle={() => onToggleThinking(messageId)}
-          />
+          <div className="mb-3">
+            <button
+              onClick={toggleCollapsedThinking}
+              className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
+            >
+              <Brain className="w-3.5 h-3.5" />
+              <span>思考过程</span>
+              <ChevronDown
+                className={cn(
+                  'w-3 h-3 transition-transform duration-200 ml-auto',
+                  collapsedThinking && 'rotate-180'
+                )}
+              />
+            </button>
+            {!collapsedThinking && (
+              <ThinkingBlock
+                thinking={effectiveThinking}
+                isStreaming={isStreaming}
+                isExpanded={expandedThinkingMsgs.has(messageId)}
+                onToggle={() => onToggleThinking(messageId)}
+              />
+            )}
+          </div>
         )}
 
         {/* File Edits - 文件编辑操作 */}
         {fileEdits && fileEdits.length > 0 && <FileEdits edits={fileEdits} />}
-
-        {/* 按 streamingItems 顺序渲染内容 */}
-        {streamingItems.map((item, index) => {
-          if (item.type === 'tool') {
-            const tc = item.toolCall as ToolCallInfo | undefined;
-            if (tc && tc.id) {
-              return (
-                <div key={`${tc.id}-${index}`} className="mb-3">
-                  <ToolCallCard
-                    toolCall={tc}
-                    isExpanded={expandedToolCalls.has(tc.id)}
-                    onToggle={() => onToggleToolCall(tc.id)}
-                  />
-                </div>
-              );
-            }
-          }
-          // 文本内容在最后统一渲染
-          return null;
-        })}
 
         {/* Agent Questions */}
         {agentQuestions && agentQuestions.length > 0 && onAnswerQuestion && (
@@ -863,8 +952,8 @@ const MessageContent: React.FC<MessageContentProps> = ({
           </div>
         )}
 
-        {/* Todo Items - 任务进度展示 */}
-        {effectiveTodoItems && effectiveTodoItems.length > 0 && (
+        {/* Todo Items - 任务进度展示（备用，当 taskProgress 不可用时） */}
+        {effectiveTodoItems && effectiveTodoItems.length > 0 && !taskProgress && (
           <div className="my-3 p-3 bg-muted/50 rounded-lg border">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2 text-xs font-medium">
@@ -879,7 +968,7 @@ const MessageContent: React.FC<MessageContentProps> = ({
             </div>
             {todoProgress && (
               <div className="w-full h-1.5 bg-muted rounded-full mb-3 overflow-hidden">
-                <div 
+                <div
                   className="h-full bg-primary rounded-full transition-all duration-300"
                   style={{ width: `${todoProgress.percentage}%` }}
                 />
@@ -887,7 +976,7 @@ const MessageContent: React.FC<MessageContentProps> = ({
             )}
             <div className="space-y-1.5">
               {effectiveTodoItems.map((item) => (
-                <div 
+                <div
                   key={item.id}
                   className={cn(
                     "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
@@ -949,35 +1038,108 @@ const MessageContent: React.FC<MessageContentProps> = ({
   // 没有 streamingItems，按传统方式渲染（历史消息）
   return (
     <>
-      {/* Thinking Process - AI思考过程最先展示 */}
-      {effectiveThinking && (
-        <ThinkingBlock
-          thinking={effectiveThinking}
-          isStreaming={isStreaming}
-          isExpanded={expandedThinkingMsgs.has(messageId)}
-          onToggle={() => onToggleThinking(messageId)}
-        />
+      {/* Result Cards - 结果卡片区域 */}
+      {resultCards && resultCards.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {resultCards.map((card, index) => (
+            <ResultCard
+              key={`result-${index}`}
+              title={card.title}
+              status={card.status}
+              description={card.description}
+              timestamp={card.timestamp}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Task Progress - 任务进度展示（基于真实 runtime 状态） */}
+      {taskProgress && (
+        <div className="my-3 p-3 bg-muted/50 rounded-lg border">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <ListTodo className="w-4 h-4 text-primary" />
+              <span>任务进度</span>
+            </div>
+            {taskProgress.currentStep !== undefined && taskProgress.totalSteps !== undefined && (
+              <span className="text-xs text-muted-foreground">
+                {taskProgress.currentStep}/{taskProgress.totalSteps}
+              </span>
+            )}
+          </div>
+          {taskProgress.totalSteps !== undefined && taskProgress.totalSteps > 0 && (
+            <div className="w-full h-1.5 bg-muted rounded-full mb-2 overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-300"
+                style={{ width: `${Math.round((taskProgress.currentStep / taskProgress.totalSteps) * 100)}%` }}
+              />
+            </div>
+          )}
+          {taskProgress.message && (
+            <p className="text-xs text-muted-foreground">{taskProgress.message}</p>
+          )}
+        </div>
       )}
 
       {/* File Edits - 文件编辑操作 */}
       {fileEdits && fileEdits.length > 0 && <FileEdits edits={fileEdits} />}
 
-      {/* Tool Calls - 按原始顺序展示工具调用 */}
+      {/* Tool Calls - 工具调用（默认折叠） */}
       {toolCalls && toolCalls.length > 0 && (
-        <div className="mb-3 space-y-2">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+        <div className="mb-3">
+          <button
+            onClick={toggleCollapsedToolCalls}
+            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
+          >
             <Terminal className="w-3.5 h-3.5" />
             <span>工具调用</span>
             <span className="text-muted-foreground/60">({toolCalls.length})</span>
-          </div>
-          {toolCalls.map((tc, index) => (
-            <ToolCallCard
-              key={tc.id}
-              toolCall={tc}
-              isExpanded={expandedToolCalls.has(tc.id)}
-              onToggle={() => onToggleToolCall(tc.id)}
+            <ChevronDown
+              className={cn(
+                'w-3 h-3 transition-transform duration-200 ml-auto',
+                collapsedToolCalls && 'rotate-180'
+              )}
             />
-          ))}
+          </button>
+          {!collapsedToolCalls && (
+            <div className="space-y-2">
+              {toolCalls.map((tc, index) => (
+                <ToolCallCard
+                  key={tc.id}
+                  toolCall={tc}
+                  isExpanded={expandedToolCalls.has(tc.id)}
+                  onToggle={() => onToggleToolCall(tc.id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Thinking Process - 思考内容（默认折叠） */}
+      {effectiveThinking && (
+        <div className="mb-3">
+          <button
+            onClick={toggleCollapsedThinking}
+            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
+          >
+            <Brain className="w-3.5 h-3.5" />
+            <span>思考过程</span>
+            <ChevronDown
+              className={cn(
+                'w-3 h-3 transition-transform duration-200 ml-auto',
+                collapsedThinking && 'rotate-180'
+              )}
+            />
+          </button>
+          {!collapsedThinking && (
+            <ThinkingBlock
+              thinking={effectiveThinking}
+              isStreaming={isStreaming}
+              isExpanded={expandedThinkingMsgs.has(messageId)}
+              onToggle={() => onToggleThinking(messageId)}
+            />
+          )}
         </div>
       )}
 
@@ -988,8 +1150,8 @@ const MessageContent: React.FC<MessageContentProps> = ({
         </div>
       )}
 
-      {/* Todo Items - 任务进度展示 */}
-      {effectiveTodoItems && effectiveTodoItems.length > 0 && (
+      {/* Todo Items - 任务进度展示（备用，当 taskProgress 不可用时） */}
+      {effectiveTodoItems && effectiveTodoItems.length > 0 && !taskProgress && (
         <div className="my-3 p-3 bg-muted/50 rounded-lg border">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-xs font-medium">
@@ -1004,7 +1166,7 @@ const MessageContent: React.FC<MessageContentProps> = ({
           </div>
           {todoProgress && (
             <div className="w-full h-1.5 bg-muted rounded-full mb-3 overflow-hidden">
-              <div 
+              <div
                 className="h-full bg-primary rounded-full transition-all duration-300"
                 style={{ width: `${todoProgress.percentage}%` }}
               />
@@ -1012,7 +1174,7 @@ const MessageContent: React.FC<MessageContentProps> = ({
           )}
           <div className="space-y-1.5">
             {effectiveTodoItems.map((item) => (
-              <div 
+              <div
                 key={item.id}
                 className={cn(
                   "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
@@ -1348,6 +1510,12 @@ export const ChatPanel: React.FC = () => {
     deleteTask,
     setIsProcessing,
     answerQuestion,
+    resultCards,
+    taskProgress,
+    collapsedThinking,
+    collapsedToolCalls,
+    toggleCollapsedThinking,
+    toggleCollapsedToolCalls,
   } = useUnifiedAgentStore();
 
   const { workspacePath, openFiles, activeFilePath, updateFileContent } = useWorkspaceStore();
