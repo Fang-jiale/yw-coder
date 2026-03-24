@@ -184,24 +184,36 @@ export const AIConfigManager: React.FC<AIConfigManagerProps> = ({
 
           <div>
             <label className="text-sm font-medium block mb-1">模型</label>
-            <select
-              value={editingConfig.model}
-              onChange={(e) =>
-                setEditingConfig({ ...editingConfig, model: e.target.value })
-              }
-              className="w-full h-9 px-3 rounded-md border border-input bg-background"
-            >
-              <option value="">选择模型</option>
-              {currentProviderModels.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+            {editingConfig.provider === 'custom' ? (
+              // Custom 提供商允许直接输入模型名称
+              <Input
+                value={editingConfig.model}
+                onChange={(e) =>
+                  setEditingConfig({ ...editingConfig, model: e.target.value })
+                }
+                placeholder="输入自定义模型名称，如：gpt-4、claude-3 等"
+              />
+            ) : (
+              // 其他提供商使用下拉选择
+              <select
+                value={editingConfig.model}
+                onChange={(e) =>
+                  setEditingConfig({ ...editingConfig, model: e.target.value })
+                }
+                className="w-full h-9 px-3 rounded-md border border-input bg-background"
+              >
+                <option value="">选择模型</option>
+                {currentProviderModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            )}
             {Object.keys(providers).length === 0 && (
               <p className="text-xs text-red-500 mt-1">正在加载模型列表...</p>
             )}
-            {Object.keys(providers).length > 0 && currentProviderModels.length === 0 && (
+            {Object.keys(providers).length > 0 && currentProviderModels.length === 0 && editingConfig.provider !== 'custom' && (
               <p className="text-xs text-muted-foreground mt-1">
                 该提供商暂无预设模型，请直接输入模型名称
               </p>

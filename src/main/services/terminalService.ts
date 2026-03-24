@@ -86,11 +86,34 @@ export class TerminalService {
 
   private getShell(): string {
     const platform = os.platform();
-    
+    const fs = require('fs');
+
     if (platform === 'win32') {
-      return process.env.COMSPEC || 'cmd.exe';
+      // Windows: 检查多个可能的 shell 路径
+      const possibleShells = [
+        process.env.COMSPEC,
+        'C:\\Windows\\System32\\cmd.exe',
+        'C:\\Windows\\SysWOW64\\cmd.exe',
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        'cmd.exe',
+        'powershell.exe',
+      ].filter(Boolean) as string[];
+
+      for (const shell of possibleShells) {
+        try {
+          if (fs.existsSync(shell)) {
+            console.log('[TerminalService] Using Windows shell:', shell);
+            return shell;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      console.warn('[TerminalService] No Windows shell found, using default cmd.exe');
+      return 'cmd.exe';
     }
-    
+
     if (platform === 'darwin') {
       // macOS: try to find available shell
       const shells = [
@@ -100,11 +123,9 @@ export class TerminalService {
         '/usr/local/bin/zsh',
         '/usr/local/bin/bash',
       ].filter(Boolean) as string[];
-      
+
       for (const shell of shells) {
         try {
-          // Check if shell exists using require('fs')
-          const fs = require('fs');
           if (fs.existsSync(shell)) {
             return shell;
           }
@@ -112,10 +133,10 @@ export class TerminalService {
           // Continue to next shell
         }
       }
-      
+
       return '/bin/zsh'; // Default fallback
     }
-    
+
     return process.env.SHELL || '/bin/bash';
   }
 }

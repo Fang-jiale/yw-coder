@@ -10,6 +10,10 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import * as monaco from 'monaco-editor';
 
+// 配置 Monaco 编辑器使用已导入的 monaco 实例，避免动态加载（支持离线环境）
+import { loader } from '@monaco-editor/react';
+loader.config({ monaco });
+
 interface SymbolInfo {
   name: string;
   kind: monaco.languages.SymbolKind;

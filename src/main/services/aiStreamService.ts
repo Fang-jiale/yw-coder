@@ -3,8 +3,9 @@ import type { Stream } from 'openai/streaming';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { AIProviderConfig } from '../../shared/types';
-import { PREDEFINED_PROVIDERS } from './aiService';
+import { PREDEFINED_PROVIDERS } from './aiProvider';
 import { AIToolService, ToolCall, ToolResult, TOOLS, ToolName } from './aiToolService';
+import { logService } from './logService';
 
 export interface StreamChunk {
   type: 'thinking' | 'thinking_complete' | 'content' | 'tool_call' | 'tool_result' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'todo_update' | 'agent_question';
@@ -340,6 +341,7 @@ export class AIStreamService {
       openFilePaths?: string[];
       selection?: { filePath: string; code: string; startLine: number; endLine: number; language: string };
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+      isRunning?: () => boolean;
     }
   ): Promise<void> {
     const client = this.getClient(config);
@@ -721,6 +723,20 @@ export class AIStreamService {
 
     if (context?.selection) {
       baseSystemPrompt += `\n用户选中了 ${context.selection.filePath} 的第 ${context.selection.startLine}-${context.selection.endLine} 行`;
+    }
+
+    // 根据模型是否支持 Function Call 添加不同的工具调用说明
+    if (useFunctionCall) {
+      // 支持 Function Call 的模型使用原生格式，不需要额外说明
+      baseSystemPrompt += '\n\n【注意】本模型支持 Function Call，工具调用会自动处理。';
+    } else {
+      // 不支持 Function Call 的模型需要使用 XML 标签格式
+      baseSystemPrompt += '\n\n【重要】本模型不支持 Function Call，工具调用需要使用 XML 标签格式：';
+      baseSystemPrompt += '\n- 读取文件: <invoke name="read_file"><parameter name="file_path">路径</parameter></invoke>';
+      baseSystemPrompt += '\n- 搜索文件: <invoke name="search_files"><parameter name="pattern">模式</parameter></invoke>';
+      baseSystemPrompt += '\n- 列出目录: <invoke name="list_files"><parameter name="path">路径</parameter></invoke>';
+      baseSystemPrompt += '\n- 执行命令: <invoke name="execute_command"><parameter name="command">命令</parameter></invoke>';
+      baseSystemPrompt += '\n所有工具调用必须包裹在 <function_calls>...</function_calls> 标签内。';
     }
 
     // 构建历史消息
@@ -1401,6 +1417,25 @@ export class AIStreamService {
           continue;
         }
 
+        // 记录完整的流式返回内容
+        logService.info('[AIStreamService] ========== 流式返回完整内容 ==========');
+        logService.info('[AIStreamService] fullContent 长度:', fullContent.length);
+        logService.info('[AIStreamService] fullContent 内容:');
+        logService.info(fullContent);
+        logService.info('[AIStreamService] ========== 流式返回内容结束 ==========');
+        
+        // 记录思考过程
+        if (roundThinking) {
+          logService.info('[AIStreamService] 思考过程:');
+          logService.info(roundThinking);
+        }
+        
+        // 记录工具调用
+        if (toolCalls.length > 0) {
+          logService.info('[AIStreamService] 工具调用数量:', toolCalls.length);
+          logService.info('[AIStreamService] 工具调用详情:', JSON.stringify(toolCalls));
+        }
+        
         // 没有工具调用，结束对话
         break;
       }
@@ -1409,6 +1444,7 @@ export class AIStreamService {
       callback({ type: 'done' });
     } catch (error) {
       console.error('AI Stream Service Error:', error);
+      logService.error('[AIStreamService] AI Stream Service Error:', error);
       callback({ type: 'error', error: String(error) });
     }
   }

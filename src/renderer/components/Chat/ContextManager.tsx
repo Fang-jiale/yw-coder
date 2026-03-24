@@ -37,6 +37,7 @@ export interface ContextStats {
   assistantMessages: number;
   systemMessages: number;
   compactedMessages: number;
+  systemPromptTokens: number; // 系统提示词 token 数
 }
 
 interface ContextManagerProps {
@@ -47,6 +48,7 @@ interface ContextManagerProps {
   onCompact?: (messageIds: string[]) => void;
   onClear?: () => void;
   className?: string;
+  systemPrompt?: string; // 系统提示词内容
 }
 
 // 估算 token 数量（简化算法）
@@ -75,6 +77,7 @@ export const ContextManager: React.FC<ContextManagerProps> = ({
   onCompact,
   onClear,
   className,
+  systemPrompt = '', // 默认空系统提示词
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedMessages] = useState<Set<string>>(new Set());
@@ -86,18 +89,22 @@ export const ContextManager: React.FC<ContextManagerProps> = ({
     assistantMessages: 0,
     systemMessages: 0,
     compactedMessages: 0,
+    systemPromptTokens: 0,
   });
 
-  // 计算统计信息
+  // 计算统计信息（包含系统提示词）
   useEffect(() => {
+    const systemPromptTokens = systemPrompt ? estimateTokens(systemPrompt) : 0;
+
     const newStats: ContextStats = {
       totalMessages: messages.length,
-      totalTokens: 0,
+      totalTokens: systemPromptTokens, // 从系统提示词开始计算
       maxTokens: maxContextTokens,
       userMessages: 0,
       assistantMessages: 0,
       systemMessages: 0,
       compactedMessages: 0,
+      systemPromptTokens,
     };
 
     messages.forEach((msg) => {
@@ -112,7 +119,7 @@ export const ContextManager: React.FC<ContextManagerProps> = ({
     });
 
     setStats(newStats);
-  }, [messages, maxContextTokens]);
+  }, [messages, maxContextTokens, systemPrompt]);
 
   const usagePercentage = (stats.totalTokens / stats.maxTokens) * 100;
   const isWarning = usagePercentage >= warningThreshold * 100;
@@ -199,6 +206,13 @@ export const ContextManager: React.FC<ContextManagerProps> = ({
               style={{ width: `${Math.min(usagePercentage, 100)}%` }}
             />
           </div>
+          {/* 显示系统提示词占用 */}
+          {stats.systemPromptTokens > 0 && (
+            <div className="flex items-center justify-between mt-1 text-[10px] text-muted-foreground">
+              <span>系统提示词: {stats.systemPromptTokens.toLocaleString()} tokens</span>
+              <span>消息: {(stats.totalTokens - stats.systemPromptTokens).toLocaleString()} tokens</span>
+            </div>
+          )}
         </div>
         <button
           onClick={() => setIsExpanded(!isExpanded)}

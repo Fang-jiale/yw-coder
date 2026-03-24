@@ -1,0 +1,28 @@
+# Checklist
+
+- [x] useTypewriter Hook 实现打字机效果
+- [x] useTypewriter 支持逐字/逐词显示模式
+- [x] useTypewriter 打字速度可调节
+- [x] useTypewriter 光标闪烁效果正常
+- [x] useStreaming Hook 集成 useTypewriter
+- [x] useStreaming 新增 displayContent 字段
+- [x] useStreaming 新增 isTyping 状态
+- [x] useStreaming 节流逻辑优化
+- [x] MarkdownRenderer 支持增量更新
+- [x] MarkdownRenderer 代码块流式渲染稳定
+- [x] MarkdownRenderer 流式状态占位符显示
+- [x] MessageItem 集成打字机效果
+- [x] MessageItem 流式光标指示器显示
+- [x] MessageItem 流式完成状态指示
+- [x] useAutoScroll 用户滚动检测准确
+- [x] useAutoScroll "新消息"提示按钮功能正常
+- [x] useAutoScroll 平滑滚动动画流畅
+- [x] StreamingIndicator 组件显示正常
+- [x] StreamingIndicator 接收中动画流畅
+- [x] StreamingIndicator 等待/错误状态指示正确
+- [x] animations.ts 打字机动画定义正确
+- [x] animations.ts 消息进入/退出动画定义正确
+- [x] animations.ts 光标闪烁动画定义正确
+- [x] ChatPanel 流式消息处理逻辑更新
+- [x] ChatPanel 集成所有新组件
+- [x] 整体流式体验对标 Trae 流畅度

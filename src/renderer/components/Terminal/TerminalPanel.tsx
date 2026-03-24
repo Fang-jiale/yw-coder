@@ -1,10 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
-import { Plus, Trash2, X } from 'lucide-react';
+import { Plus, Trash2, X, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import 'xterm/css/xterm.css';
+
+interface TerminalPanelProps {
+  onCollapse?: () => void;
+}
 
 interface TerminalSession {
   id: string;
@@ -13,7 +17,7 @@ interface TerminalSession {
   fitAddon: FitAddon;
 }
 
-export const TerminalPanel: React.FC = () => {
+export const TerminalPanel: React.FC<TerminalPanelProps> = ({ onCollapse }) => {
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -134,6 +138,15 @@ export const TerminalPanel: React.FC = () => {
     <div className="flex flex-col h-full bg-[#1e1e1e]">
       {/* Tabs */}
       <div className="flex items-center bg-muted border-b">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 ml-1 mr-1"
+          onClick={onCollapse}
+          title="收起终端"
+        >
+          <ChevronDown className="w-3 h-3" />
+        </Button>
         {sessions.map(session => (
           <div
             key={session.id}

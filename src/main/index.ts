@@ -8,6 +8,7 @@ import { SettingsService } from './services/settingsService';
 import { BuilderService } from './services/builderService';
 import { CodeRewriteService } from './services/codeRewriteService';
 import { setupAICoderService } from './services/aicoderService';
+import { logService } from './services/logService';
 import {
   registerUnifiedAgentIPC,
   initializeAgentConfigs,
@@ -19,36 +20,52 @@ app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
 
+// Windows 离线/内网环境兼容性设置
+if (process.platform === 'win32') {
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  app.commandLine.appendSwitch('disable-features', 'VizDisplayCompositor');
+  // 禁用硬件加速，解决某些 Windows 显卡驱动问题
+  app.disableHardwareAcceleration();
+  // 禁用网络相关功能，避免内网环境阻塞
+  app.commandLine.appendSwitch('disable-web-security');
+  app.commandLine.appendSwitch('disable-features', 'NetworkService');
+  // 禁用自动更新检查
+  app.commandLine.appendSwitch('disable-auto-update');
+  // 禁用崩溃报告器
+  app.commandLine.appendSwitch('disable-crash-reporter');
+  // 禁用默认浏览器检查
+  app.commandLine.appendSwitch('no-default-browser-check');
+}
+
 const isDev = process.argv.includes('--dev');
 
 class YWCodeRApp {
   private mainWindow: BrowserWindow | null = null;
-  private fileService: FileService;
-  private aiService: AIService;
+  private fileService: FileService | null = null;
+  private aiService: AIService | null = null;
   private terminalService: TerminalService | null = null;
-  private settingsService: SettingsService;
-  private builderService: BuilderService;
-  private codeRewriteService: CodeRewriteService;
+  private settingsService: SettingsService | null = null;
+  private builderService: BuilderService | null = null;
+  private codeRewriteService: CodeRewriteService | null = null;
 
   constructor() {
-    this.fileService = new FileService();
-    this.settingsService = new SettingsService();
-    this.aiService = new AIService(this.settingsService);
-    this.builderService = new BuilderService();
-    this.codeRewriteService = new CodeRewriteService(this.aiService);
     this.initializeApp();
   }
 
   private initializeApp(): void {
-    app.whenReady().then(() => {
-      try {
-        this.terminalService = new TerminalService();
-      } catch (e) {
-        console.error('Failed to initialize terminal service:', e);
-      }
+    app.whenReady().then(async () => {
+      // 1. 立即创建窗口，让用户尽快看到界面
       this.createWindow();
-      this.setupIPC();
-      this.setupMenu();
+
+      // 2. 延迟初始化非关键服务（使用 requestIdleCallback 或 setTimeout）
+      setTimeout(() => {
+        this.initializeServices();
+      }, 100);
+
+      // 3. 更延迟初始化 Agent 配置（不影响启动速度）
+      setTimeout(() => {
+        this.initializeAgentServices();
+      }, 500);
     });
 
     app.on('window-all-closed', () => {
@@ -68,6 +85,49 @@ class YWCodeRApp {
     });
   }
 
+  // 初始化核心服务
+  private initializeServices(): void {
+    try {
+      this.fileService = new FileService();
+      this.settingsService = new SettingsService();
+      this.aiService = new AIService(this.settingsService);
+      this.builderService = new BuilderService();
+      this.codeRewriteService = new CodeRewriteService(this.aiService);
+
+      // 立即注册 Unified Agent IPC（前端启动时就需要）
+      registerUnifiedAgentIPC();
+
+      // 设置 IPC（必须在服务初始化后）
+      this.setupIPC();
+      this.setupMenu();
+    } catch (e) {
+      console.error('Failed to initialize services:', e);
+    }
+
+    // 初始化终端服务
+    try {
+      this.terminalService = new TerminalService();
+    } catch (e) {
+      console.error('Failed to initialize terminal service:', e);
+    }
+  }
+
+  // 初始化 Agent 相关服务（延迟）
+  private async initializeAgentServices(): Promise<void> {
+    if (!this.aiService) return;
+
+    setupAICoderService(this.aiService);
+
+    try {
+      await initializeAgentConfigs();
+      const aiConfigs = this.aiService.getConfigs();
+      // 始终创建内置智能体配置，即使用户没有配置 AI
+      await createDefaultConfigs(aiConfigs);
+    } catch (e) {
+      console.error('Failed to initialize agent configs:', e);
+    }
+  }
+
   private createWindow(): void {
     const isMac = process.platform === 'darwin';
     const isWin = process.platform === 'win32';
@@ -80,11 +140,22 @@ class YWCodeRApp {
       titleBarStyle: isMac ? 'hidden' : 'hiddenInset',
       frame: false,
       icon: path.join(__dirname, '../../logo.png'),
+      show: false, // 先不显示，等加载完成后再显示
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         preload: path.join(__dirname, 'preload.js'),
+        // 离线环境兼容性设置
+        webSecurity: false,
+        allowRunningInsecureContent: true,
+        // 禁用实验性功能，避免内网环境问题
+        experimentalFeatures: false,
       },
+    });
+
+    // 窗口准备好后再显示，避免白屏
+    this.mainWindow.once('ready-to-show', () => {
+      this.mainWindow?.show();
     });
 
     if (isDev) {
@@ -104,39 +175,41 @@ class YWCodeRApp {
   }
 
   private setupIPC(): void {
+    if (!this.fileService || !this.aiService || !this.settingsService) return;
+
     // File operations
     ipcMain.handle(IPC_CHANNELS.FILE_READ, async (_, filePath: string) => {
-      return this.fileService.readFile(filePath);
+      return this.fileService!.readFile(filePath);
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_WRITE, async (_, filePath: string, content: string) => {
-      return this.fileService.writeFile(filePath, content);
+      return this.fileService!.writeFile(filePath, content);
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_DELETE, async (_, filePath: string) => {
-      return this.fileService.deleteFile(filePath);
+      return this.fileService!.deleteFile(filePath);
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_RENAME, async (_, oldPath: string, newPath: string) => {
-      return this.fileService.renameFile(oldPath, newPath);
+      return this.fileService!.renameFile(oldPath, newPath);
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_CREATE, async (_, filePath: string, isDirectory: boolean) => {
-      return this.fileService.createFile(filePath, isDirectory);
+      return this.fileService!.createFile(filePath, isDirectory);
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_GET_TREE, async (_, dirPath: string) => {
-      return this.fileService.getFileTree(dirPath);
+      return this.fileService!.getFileTree(dirPath);
     });
 
     // AI operations
     ipcMain.handle(IPC_CHANNELS.AI_CHAT, async (_, request, configId?: string) => {
-      return this.aiService.chat(request, configId);
+      return this.aiService!.chat(request, configId);
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_STREAM, async (event, request, configId?: string) => {
       try {
-        const stream = await this.aiService.streamChat(request, configId);
+        const stream = await this.aiService!.streamChat(request, configId);
         for await (const chunk of stream) {
           event.sender.send(IPC_CHANNELS.AI_STREAM, chunk);
         }
@@ -147,36 +220,36 @@ class YWCodeRApp {
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_COMPLETE, async (_, request, configId?: string) => {
-      return this.aiService.complete(request, configId);
+      return this.aiService!.complete(request, configId);
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_TEST_CONNECTION, async (_, configId?: string) => {
-      return this.aiService.testConnection(configId);
+      return this.aiService!.testConnection(configId);
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_GET_PROVIDERS, async () => {
-      return this.aiService.getPredefinedProviders();
+      return this.aiService!.getPredefinedProviders();
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_GET_CONFIGS, async () => {
       return {
-        configs: this.aiService.getConfigs(),
-        activeConfigId: this.settingsService.get('activeConfigId'),
+        configs: this.aiService!.getConfigs(),
+        activeConfigId: this.settingsService!.get('activeConfigId'),
       };
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_SAVE_CONFIG, async (_, config) => {
-      this.aiService.saveConfig(config);
+      this.aiService!.saveConfig(config);
       return true;
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_DELETE_CONFIG, async (_, configId: string) => {
-      this.aiService.deleteConfig(configId);
+      this.aiService!.deleteConfig(configId);
       return true;
     });
 
     ipcMain.handle(IPC_CHANNELS.AI_SET_ACTIVE_CONFIG, async (_, configId: string) => {
-      this.aiService.setActiveConfig(configId);
+      this.aiService!.setActiveConfig(configId);
       return true;
     });
 
@@ -207,27 +280,36 @@ class YWCodeRApp {
       this.terminalService?.kill(sessionId);
     });
 
-    // Settings
-    ipcMain.handle(IPC_CHANNELS.SETTINGS_GET, async (_, key?: string) => {
-      return this.settingsService.get(key);
+    // Settings operations
+    ipcMain.handle(IPC_CHANNELS.SETTINGS_GET, async (_, key: string) => {
+      return this.settingsService!.get(key);
     });
 
     ipcMain.handle(IPC_CHANNELS.SETTINGS_SET, async (_, key: string, value: any) => {
-      this.settingsService.set(key, value);
+      this.settingsService!.set(key, value);
       return true;
     });
 
-    // App operations
-    ipcMain.handle(IPC_CHANNELS.APP_GET_VERSION, async () => {
-      return app.getVersion();
-    });
+    // Builder operations - 暂时注释掉，等待实现
+    // ipcMain.handle(IPC_CHANNELS.BUILDER_START, async (_, config) => {
+    //   return this.builderService!.startBuilding(config);
+    // });
 
-    // Window control handlers
-    ipcMain.on('window:minimize', () => {
+    // ipcMain.handle(IPC_CHANNELS.BUILDER_STOP, async (_, taskId: string) => {
+    //   return this.builderService!.stopBuilding(taskId);
+    // });
+
+    // Code Rewrite operations - 暂时注释掉，等待实现
+    // ipcMain.handle(IPC_CHANNELS.CODE_REWRITE, async (_, filePath: string, instruction: string) => {
+    //   return this.codeRewriteService!.rewriteCode(filePath, instruction);
+    // });
+
+    // Window operations
+    ipcMain.handle('window:minimize', () => {
       this.mainWindow?.minimize();
     });
 
-    ipcMain.on('window:maximize', () => {
+    ipcMain.handle('window:maximize', () => {
       if (this.mainWindow?.isMaximized()) {
         this.mainWindow.unmaximize();
       } else {
@@ -235,114 +317,68 @@ class YWCodeRApp {
       }
     });
 
-    ipcMain.on('window:close', () => {
+    ipcMain.handle('window:close', () => {
       this.mainWindow?.close();
     });
 
-    ipcMain.handle('window:isMaximized', async () => {
-      return this.mainWindow?.isMaximized() ?? false;
-    });
-
-    ipcMain.handle('window:reload', async () => {
+    ipcMain.handle('window:reload', () => {
       this.mainWindow?.webContents.reload();
     });
 
-    ipcMain.handle('window:reloadIgnoringCache', async () => {
+    ipcMain.handle('window:reloadIgnoringCache', () => {
       this.mainWindow?.webContents.reloadIgnoringCache();
     });
 
-    ipcMain.handle(IPC_CHANNELS.APP_SHOW_OPEN_DIALOG, async (_, options) => {
-      if (!this.mainWindow) {
-        throw new Error('Main window is not ready');
-      }
-      const result = await dialog.showOpenDialog(this.mainWindow, options);
+    // Log operations
+    ipcMain.handle('log:getPath', () => {
+      return logService.getLogFilePath();
+    });
+
+    ipcMain.handle('log:readRecent', async (_, lines: number) => {
+      return logService.readRecentLogs(lines);
+    });
+
+    // Dialog operations
+    ipcMain.handle('dialog:openFolder', async () => {
+      const result = await dialog.showOpenDialog(this.mainWindow!, {
+        properties: ['openDirectory'],
+      });
+      return result.filePaths[0];
+    });
+
+    ipcMain.handle('dialog:openFile', async (_, options) => {
+      const result = await dialog.showOpenDialog(this.mainWindow!, options);
+      return result.filePaths;
+    });
+
+    ipcMain.handle('dialog:saveFile', async (_, options) => {
+      const result = await dialog.showSaveDialog(this.mainWindow!, options);
+      return result.filePath;
+    });
+
+    // App dialog operations (used by preload)
+    ipcMain.handle('app:show-open-dialog', async (_, options) => {
+      const result = await dialog.showOpenDialog(this.mainWindow!, options);
       return result;
     });
 
-    ipcMain.handle(IPC_CHANNELS.APP_SHOW_SAVE_DIALOG, async (_, options) => {
-      if (!this.mainWindow) {
-        throw new Error('Main window is not ready');
-      }
-      const result = await dialog.showSaveDialog(this.mainWindow, options);
+    ipcMain.handle('app:show-save-dialog', async (_, options) => {
+      const result = await dialog.showSaveDialog(this.mainWindow!, options);
       return result;
     });
 
-    ipcMain.handle(IPC_CHANNELS.APP_OPEN_EXTERNAL, async (_, url: string) => {
+    // Shell operations
+    ipcMain.handle('shell:openExternal', async (_, url: string) => {
       await shell.openExternal(url);
     });
 
-    // Builder operations
-    ipcMain.handle(IPC_CHANNELS.BUILDER_START, async (event, description: string, workspacePath: string, configId?: string) => {
-      // Get config
-      let config: AIProviderConfig | undefined;
-      if (configId) {
-        const configs = this.aiService.getConfigs();
-        config = configs.find(c => c.id === configId);
-      }
-      if (!config) {
-        config = this.aiService.getActiveConfig() || undefined;
-      }
-      if (!config) {
-        throw new Error('No AI configuration found. Please add a configuration in settings.');
-      }
-
-      this.builderService.onProgress((task) => {
-        event.sender.send(IPC_CHANNELS.BUILDER_STATUS, task);
-      });
-      return this.builderService.generateProject(description, workspacePath, config);
-    });
-
-    ipcMain.handle(IPC_CHANNELS.BUILDER_CANCEL, async () => {
-      this.builderService.cancelCurrentTask();
-    });
-
-    // Code rewrite
-    ipcMain.handle(IPC_CHANNELS.CODE_REWRITE, async (_, request, configId?: string) => {
-      let config: AIProviderConfig | undefined;
-      if (configId) {
-        const configs = this.aiService.getConfigs();
-        config = configs.find(c => c.id === configId);
-      }
-      if (!config) {
-        config = this.aiService.getActiveConfig() || undefined;
-      }
-      if (!config) {
-        throw new Error('No AI configuration found. Please add a configuration in settings.');
-      }
-      return this.codeRewriteService.rewrite(request, config);
-    });
-
-    // Code refactor options
-    ipcMain.handle(IPC_CHANNELS.CODE_REFACTOR, async (_, code, language, configId?: string) => {
-      let config: AIProviderConfig | undefined;
-      if (configId) {
-        const configs = this.aiService.getConfigs();
-        config = configs.find(c => c.id === configId);
-      }
-      if (!config) {
-        config = this.aiService.getActiveConfig() || undefined;
-      }
-      if (!config) {
-        throw new Error('No AI configuration found. Please add a configuration in settings.');
-      }
-      return this.codeRewriteService.getRefactorOptions(code, language, config);
+    ipcMain.handle('shell:showItemInFolder', async (_, fullPath: string) => {
+      shell.showItemInFolder(fullPath);
     });
 
     // File search
     ipcMain.handle('file:search', async (_, query: string, workspacePath: string) => {
-      return this.fileService.searchFiles(query, workspacePath);
-    });
-
-    setupAICoderService(this.aiService);
-
-    // Setup Unified Agent IPC (includes Chat, Agent, and SOLO modes)
-    registerUnifiedAgentIPC();
-    initializeAgentConfigs().then(async () => {
-      // 创建默认配置（如果有AI配置）
-      const aiConfigs = this.aiService.getConfigs();
-      if (aiConfigs.length > 0) {
-        await createDefaultConfigs(aiConfigs);
-      }
+      return this.fileService!.searchFiles(query, workspacePath);
     });
   }
 
@@ -377,19 +413,11 @@ class YWCodeRApp {
         label: '视图',
         submenu: [
           { label: '命令面板', accelerator: 'CmdOrCtrl+Shift+P', click: () => this.sendMenuEvent('view:commandPalette') },
-          { label: '打开侧边栏', accelerator: 'CmdOrCtrl+B', click: () => this.sendMenuEvent('view:toggleSidebar') },
+          { label: '侧边栏', accelerator: 'CmdOrCtrl+B', click: () => this.sendMenuEvent('view:toggleSidebar') },
           { type: 'separator' },
-          { label: '放大', accelerator: 'CmdOrCtrl+=', click: () => this.sendMenuEvent('view:zoomIn') },
+          { label: '放大', accelerator: 'CmdOrCtrl+Plus', click: () => this.sendMenuEvent('view:zoomIn') },
           { label: '缩小', accelerator: 'CmdOrCtrl+-', click: () => this.sendMenuEvent('view:zoomOut') },
           { label: '重置缩放', accelerator: 'CmdOrCtrl+0', click: () => this.sendMenuEvent('view:zoomReset') },
-        ],
-      },
-      {
-        label: 'AI',
-        submenu: [
-          { label: '新建对话', accelerator: 'CmdOrCtrl+Shift+L', click: () => this.sendMenuEvent('ai:newChat') },
-          { label: 'Builder模式', accelerator: 'CmdOrCtrl+Shift+B', click: () => this.sendMenuEvent('ai:builder') },
-          { label: '代码补全', accelerator: 'Tab', click: () => this.sendMenuEvent('ai:complete') },
         ],
       },
       {
@@ -400,10 +428,16 @@ class YWCodeRApp {
         ],
       },
       {
+        label: 'AI',
+        submenu: [
+          { label: '新建对话', accelerator: 'CmdOrCtrl+Shift+N', click: () => this.sendMenuEvent('ai:newChat') },
+          { label: 'AI 设置', click: () => this.sendMenuEvent('ai:settings') },
+        ],
+      },
+      {
         label: '帮助',
         submenu: [
-          { label: '欢迎使用', click: () => this.sendMenuEvent('help:welcome') },
-          { label: '文档', click: () => this.sendMenuEvent('help:docs') },
+          { label: '文档', click: () => shell.openExternal('https://github.com/yourusername/ywcoder') },
           { label: '关于', click: () => this.sendMenuEvent('help:about') },
         ],
       },
@@ -418,4 +452,5 @@ class YWCodeRApp {
   }
 }
 
+// Start the application
 new YWCodeRApp();

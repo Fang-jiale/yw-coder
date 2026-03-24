@@ -12,7 +12,7 @@ import {
   GitBranch
 } from 'lucide-react';
 import { useWorkspaceStore } from '@/store/workspaceStore';
-import { useChatStore } from '@/store/chatStore';
+import { useUnifiedAgentStore } from '@/store/unifiedAgentStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { cn } from '@/lib/utils';
 
@@ -43,7 +43,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
   const [dialogInputValue, setDialogInputValue] = useState('');
   
   const { workspacePath, openFile, createFile } = useWorkspaceStore();
-  const { createSession } = useChatStore();
+  const { createTask } = useUnifiedAgentStore();
   const { theme, updateSettings } = useSettingsStore();
 
   const handleInputConfirm = () => {
@@ -137,7 +137,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
         icon: MessageSquare,
         shortcut: 'Ctrl+Shift+L',
         action: () => {
-          createSession('chat');
+          createTask('新对话', '');
           onClose();
         },
         category: 'AI',
@@ -149,7 +149,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
         icon: Sparkles,
         shortcut: 'Ctrl+Shift+B',
         action: () => {
-          createSession('builder');
+          createTask('AI Builder', '');
           onClose();
         },
         category: 'AI',
@@ -212,11 +212,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
             onConfirm: async (repoUrl: string) => {
               if (workspacePath && repoUrl) {
                 try {
-                  await window.electronAPI?.terminal?.execute({
-                    command: 'git',
-                    args: ['clone', repoUrl],
-                    cwd: workspacePath,
-                  });
+                  await window.electronAPI?.terminal?.write?.('1', `git clone ${repoUrl}\r`);
                 } catch (error) {
                   console.error('Git clone failed:', error);
                 }
@@ -241,7 +237,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
     }
 
     return commands;
-  }, [searchQuery, theme, createSession, openFile, onClose, updateSettings, workspacePath, createFile]);
+  }, [searchQuery, theme, createTask, openFile, onClose, updateSettings, workspacePath, createFile]);
 
   const commands = getCommands();
   const filteredCommands = commands;

@@ -5,21 +5,22 @@
 
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import { immer } from 'zustand/middleware/immer';
 import { persist } from 'zustand/middleware';
+import { immer } from 'zustand/middleware/immer';
 import {
   AgentConfig,
   AgentTask,
   AgentStep,
   AgentMessage,
   AgentToolCall,
-  AgentRuntimeMode,
+  AgentType,
   TodoItem,
-  createDefaultAgentConfig,
+  createAgentConfig,
   ExecutionPlan,
   ExecutionPlanStep,
   AgentQuestion,
 } from '../../shared/agentTypes';
+import { TimestampedToolCall } from '../components/Chat/utils/messageParser';
 import { AIProviderConfig } from '../../shared/types';
 
 // 调试模式开关
@@ -70,10 +71,12 @@ interface UnifiedAgentState {
   isProcessing: boolean;
   // 当前流式消息
   streamingMessage: string;
+  // 当前流式内容块（用于按时间分块展示）
+  streamingContentBlocks: Array<{ type: 'text' | 'thinking' | 'question' | 'todo'; content?: string; thinking?: string; question?: AgentQuestion; todoItems?: TodoItem[]; timestamp: number }>;
   // 当前思考内容
   streamingThinking: string;
-  // 当前流式工具调用
-  streamingToolCalls: AgentToolCall[];
+  // 当前流式工具调用（带时间戳）
+  streamingToolCalls: TimestampedToolCall[];
   // 当前待办事项
   todoItems: TodoItem[];
   // 错误信息
@@ -90,7 +93,7 @@ interface UnifiedAgentState {
 
 interface UnifiedAgentActions {
   // 配置管理
-  createConfig: (runtimeMode: AgentRuntimeMode, aiConfig: AIProviderConfig, name?: string) => Promise<AgentConfig>;
+  createConfig: (type: AgentType, aiConfig: AIProviderConfig, name?: string) => Promise<AgentConfig>;
   updateConfig: (configId: string, updates: Partial<AgentConfig>) => Promise<void>;
   deleteConfig: (configId: string) => Promise<void>;
   setActiveConfig: (configId: string) => void;
@@ -111,6 +114,12 @@ interface UnifiedAgentActions {
   addQuestionToMessage: (taskId: string, messageIndex: number, question: AgentQuestion) => void;
   answerQuestion: (taskId: string, messageIndex: number, questionId: string, answer: string) => void;
   sendMessage: (taskId: string, content: string, aiConfig?: any) => Promise<void>;
+  clearTaskMessages: (taskId: string) => void;
+  deleteTaskMessage: (taskId: string, messageId: string) => void;
+
+  // 上下文压缩
+  compactContextIfNeeded: (taskId: string, aiConfig?: any) => Promise<void>;
+  compactMessage: (taskId: string, messageId: string) => void;
 
   // 状态更新
   updateTaskStatus: (taskId: string, status: AgentTask['status']) => void;
@@ -125,6 +134,8 @@ interface UnifiedAgentActions {
   appendStreamingMessage: (content: string) => void;
   setStreamingThinking: (thinking: string) => void;
   appendStreamingThinking: (content: string) => void;
+  addStreamingQuestion: (question: AgentQuestion) => void;
+  addStreamingTodo: (items: TodoItem[]) => void;
   addStreamingToolCall: (toolCall: AgentToolCall) => void;
   updateStreamingToolCall: (toolCallId: string, result: any, error?: string, params?: Record<string, any>) => void;
   setIsProcessing: (isProcessing: boolean) => void;
@@ -148,6 +159,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         isCreating: false,
         isProcessing: false,
         streamingMessage: '',
+        streamingContentBlocks: [],
         streamingThinking: '',
         streamingToolCalls: [],
         todoItems: [],
@@ -162,8 +174,8 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         isPaused: false,
 
         // 配置管理
-        createConfig: async (runtimeMode, aiConfig, name) => {
-          const config = createDefaultAgentConfig(runtimeMode, aiConfig, name);
+        createConfig: async (type, aiConfig, name) => {
+          const config = createAgentConfig(type, aiConfig, name, false);
           set((state) => {
             state.configs.push(config);
             if (!state.activeConfigId) {
@@ -252,7 +264,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
               } else if (configs.length === 0 && retryCount < 3) {
                 // 如果没有配置且重试次数小于3，延迟重试（等待默认配置创建）
                 console.log('[loadConfigs] No configs found, retrying...', retryCount + 1);
-                setTimeout(() => get().loadConfigs(retryCount + 1), 500);
+                setTimeout(() => get().loadConfigs(retryCount + 1), 2000);
               }
             }
           } catch (error) {
@@ -347,6 +359,49 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
 
         stopTask: async (taskId) => {
           try {
+            // 在停止任务前，先保存当前的流式内容到消息历史
+            const state = get();
+            const { streamingMessage, streamingToolCalls } = state;
+
+            // 使用 set 函数来修改状态（Immer 要求）
+            // 注意：不保存 thinking 内容，只保存正文和工具调用
+            if (streamingMessage || streamingToolCalls.length > 0) {
+              // 转换工具调用类型，移除 timestamp 字段
+              const toolCallsForSave: AgentToolCall[] = streamingToolCalls.map(tc => ({
+                id: tc.id,
+                toolName: (tc as any).name || (tc as any).toolName || '',
+                params: (tc as any).parameters || (tc as any).params || {},
+                status: tc.status,
+                result: tc.result,
+                error: tc.error,
+              }));
+
+              set((state) => {
+                const task = state.tasks.find((t) => t.id === taskId);
+                if (task && task.messages.length > 0) {
+                  const lastMessage = task.messages[task.messages.length - 1];
+                  if (lastMessage.role === 'assistant') {
+                    // 更新最后一条AI消息的内容（不保存 thinking）
+                    lastMessage.content = streamingMessage || lastMessage.content;
+                    if (toolCallsForSave.length > 0) {
+                      lastMessage.toolCalls = toolCallsForSave;
+                    }
+                    task.updatedAt = Date.now();
+                  } else {
+                    // 添加新的消息到历史（不保存 thinking）
+                    task.messages.push({
+                      id: Date.now().toString(),
+                      role: 'assistant',
+                      content: streamingMessage,
+                      toolCalls: toolCallsForSave,
+                      timestamp: Date.now(),
+                    });
+                    task.updatedAt = Date.now();
+                  }
+                }
+              });
+            }
+
             await window.electronAPI?.unifiedAgent?.stopTask?.({ taskId });
             set((state) => {
               const task = state.tasks.find((t) => t.id === taskId);
@@ -354,7 +409,8 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
                 task.status = 'failed';
               }
             });
-            set({ isProcessing: false });
+            // 清空流式状态
+            get().clearStreaming();
           } catch (error: any) {
             set({ error: error.message });
             throw error;
@@ -383,7 +439,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
           // 如果任务存在，尝试自动切换到任务对应的配置
           // 这样切换任务时，如果任务的模式与当前配置不同，会自动切换配置
           // 这会触发 setActiveConfig 中的保存任务逻辑
-          if (task && task.runtimeMode && task.configId) {
+          if (task && task.agentType && task.configId) {
             const matchingConfig = state.configs.find(c => c.id === task.configId);
             if (matchingConfig && matchingConfig.id !== state.activeConfigId) {
               // 使用 await 确保当前任务先被保存，再切换配置
@@ -467,7 +523,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         },
 
         sendMessage: async (taskId, content, aiConfig) => {
-          const { addMessage, activeConfigId, configs, setIsProcessing } = get();
+          const { addMessage, activeConfigId, configs, setIsProcessing, compactContextIfNeeded } = get();
           const task = get().tasks.find((t) => t.id === taskId);
           if (!task) return;
 
@@ -478,6 +534,9 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
           if (!config) {
             throw new Error('未找到 Agent 配置');
           }
+
+          // 自动压缩上下文（如果超过阈值）
+          await compactContextIfNeeded(taskId, aiConfig);
 
           // 添加用户消息到前端 store
           const userMessage: AgentMessage = {
@@ -493,7 +552,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
 
           try {
             // 根据模式选择处理方式
-            if (config.runtimeMode === 'solo' || config.runtimeMode === 'agent') {
+            if (config.type === 'solocoder' || config.type === 'builder') {
               // SOLO 和 Agent 模式：先发送消息到主进程，再启动任务
               // 这样主进程中的 task.messages 会包含用户消息
               await window.electronAPI?.unifiedAgent?.sendMessage?.({ taskId, content, aiConfig });
@@ -506,6 +565,119 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
             setIsProcessing(false);
             throw error;
           }
+        },
+
+        // 清空任务的所有消息
+        clearTaskMessages: (taskId) => {
+          set((state) => {
+            const task = state.tasks.find((t) => t.id === taskId);
+            if (task) {
+              task.messages = [];
+              task.updatedAt = Date.now();
+            }
+          });
+        },
+
+        // 删除任务的指定消息
+        deleteTaskMessage: (taskId, messageId) => {
+          set((state) => {
+            const task = state.tasks.find((t) => t.id === taskId);
+            if (task) {
+              task.messages = task.messages.filter((m) => m.id !== messageId);
+              task.updatedAt = Date.now();
+            }
+          });
+        },
+
+        // 上下文压缩 - 检查是否需要压缩并执行
+        compactContextIfNeeded: async (taskId, aiConfig) => {
+          const { compactMessage } = get();
+          const task = get().tasks.find((t) => t.id === taskId);
+          if (!task || task.messages.length < 4) return; // 消息太少不压缩
+
+          // 获取上下文长度配置
+          const contextLength = aiConfig?.contextLength || 8000;
+          const systemPrompt = aiConfig?.systemPrompt || '';
+          const warningThreshold = 0.7; // 70% 时开始压缩
+
+          // 估算 token 数
+          const estimateTokens = (content: string): number => {
+            if (!content) return 0;
+            let tokens = 0;
+            for (const char of content) {
+              if (/[\u4e00-\u9fa5]/.test(char)) {
+                tokens += 1.5;
+              } else {
+                tokens += 0.25;
+              }
+            }
+            return Math.ceil(tokens);
+          };
+
+          // 计算当前上下文使用量
+          const systemTokens = estimateTokens(systemPrompt);
+          const messageTokens = task.messages.reduce((sum, msg) => {
+            return sum + estimateTokens(msg.content);
+          }, 0);
+          const totalTokens = systemTokens + messageTokens;
+          const usagePercentage = totalTokens / contextLength;
+
+          // 如果超过阈值，压缩旧消息
+          if (usagePercentage >= warningThreshold) {
+            DEBUG && console.log(`[ContextCompression] Usage: ${(usagePercentage * 100).toFixed(1)}%, starting compression...`);
+
+            // 保留最近的消息（用户和助手的最后一轮对话）
+            const keepCount = 2;
+            const messagesToCompact = task.messages.slice(0, -keepCount);
+
+            // 压缩旧消息（跳过已压缩的）
+            let compactedCount = 0;
+            messagesToCompact.forEach((msg) => {
+              if (!msg.isCompacted && msg.role !== 'system') {
+                compactMessage(taskId, msg.id);
+                compactedCount++;
+              }
+            });
+
+            if (compactedCount > 0) {
+              DEBUG && console.log(`[ContextCompression] Compacted ${compactedCount} messages`);
+            }
+          }
+        },
+
+        // 压缩单条消息
+        compactMessage: (taskId, messageId) => {
+          set((state) => {
+            const task = state.tasks.find((t) => t.id === taskId);
+            if (!task) return;
+
+            const msg = task.messages.find((m) => m.id === messageId);
+            if (!msg || msg.isCompacted) return;
+
+            // 生成摘要
+            const content = msg.content || '';
+            let summary: string;
+
+            if (content.length > 200) {
+              // 长消息：取前100字和后50字
+              summary = content.substring(0, 100) + ' ... ' + content.substring(content.length - 50);
+            } else if (content.length > 50) {
+              // 中等消息：取前50字
+              summary = content.substring(0, 50) + '...';
+            } else {
+              // 短消息：不压缩
+              return;
+            }
+
+            // 保存原始内容并标记为已压缩
+            msg.originalContent = content;
+            msg.content = `[已压缩] ${summary}`;
+            msg.isCompacted = true;
+            msg.compactedAt = Date.now();
+            task.updatedAt = Date.now();
+
+            DEBUG && console.log(`[ContextCompression] Message ${messageId} compacted`);
+          });
         },
 
         // 状态更新
@@ -596,6 +768,19 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         appendStreamingMessage: (content) => {
           set((state) => {
             state.streamingMessage += content;
+            // 更新最后一个文本块的内容，而不是创建新块
+            // 这样可以避免每个 chunk 都被渲染为独立的 div 导致换行
+            const lastBlock = state.streamingContentBlocks[state.streamingContentBlocks.length - 1];
+            if (lastBlock && lastBlock.type === 'text') {
+              lastBlock.content += content;
+            } else {
+              // 如果没有文本块或最后一个块不是文本，创建新块
+              state.streamingContentBlocks.push({
+                type: 'text',
+                content,
+                timestamp: Date.now(),
+              });
+            }
           });
         },
 
@@ -606,12 +791,79 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         appendStreamingThinking: (content) => {
           set((state) => {
             state.streamingThinking += content;
+            // 更新最后一个思考块的内容，而不是创建新块
+            const lastBlock = state.streamingContentBlocks[state.streamingContentBlocks.length - 1];
+            if (lastBlock && lastBlock.type === 'thinking') {
+              lastBlock.content += content;
+            } else {
+              // 如果没有思考块或最后一个块不是思考块，创建新块
+              state.streamingContentBlocks.push({
+                type: 'thinking',
+                content,
+                timestamp: Date.now(),
+              });
+            }
+          });
+        },
+
+        addStreamingQuestion: (question) => {
+          set((state) => {
+            console.log('[addStreamingQuestion] Adding question to streaming blocks:', question);
+            state.streamingContentBlocks.push({
+              type: 'question',
+              question,
+              timestamp: Date.now(),
+            });
+          });
+        },
+
+        addStreamingTodo: (items) => {
+          set((state) => {
+            console.log('[addStreamingTodo] Adding todo items to streaming blocks:', items);
+            
+            // 查找现有的 todo 块
+            const existingTodoIndex = state.streamingContentBlocks.findIndex(
+              (block) => block.type === 'todo'
+            );
+            
+            if (existingTodoIndex !== -1) {
+              // 更新现有的 todo 块
+              console.log('[addStreamingTodo] Updating existing todo block at index:', existingTodoIndex);
+              state.streamingContentBlocks[existingTodoIndex] = {
+                type: 'todo',
+                todoItems: items,
+                timestamp: Date.now(),
+              };
+            } else {
+              // 如果没有现有的 todo 块，才创建新的
+              console.log('[addStreamingTodo] No existing todo block, creating new one');
+              state.streamingContentBlocks.push({
+                type: 'todo',
+                todoItems: items,
+                timestamp: Date.now(),
+              });
+            }
           });
         },
 
         addStreamingToolCall: (toolCall) => {
           set((state) => {
-            state.streamingToolCalls.push(toolCall);
+            // 检查是否已存在相同的工具调用，避免重复添加
+            const existingIndex = state.streamingToolCalls.findIndex(tc => tc.id === toolCall.id);
+            if (existingIndex !== -1) {
+              // 更新已存在的工具调用
+              state.streamingToolCalls[existingIndex] = {
+                ...toolCall,
+                timestamp: Date.now(),
+              };
+            } else {
+              // 添加新的工具调用
+              const timestampedToolCall: TimestampedToolCall = {
+                ...toolCall,
+                timestamp: Date.now(),
+              };
+              state.streamingToolCalls.push(timestampedToolCall);
+            }
           });
         },
 
@@ -640,6 +892,7 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
         clearStreaming: () => {
           set({
             streamingMessage: '',
+            streamingContentBlocks: [],
             streamingThinking: '',
             streamingToolCalls: [],
             isProcessing: false,
@@ -691,6 +944,8 @@ export function setupUnifiedAgentEventListeners(): void {
     updateTodoItems,
     appendStreamingMessage,
     appendStreamingThinking,
+    addStreamingQuestion,
+    addStreamingTodo,
     addStreamingToolCall,
     updateStreamingToolCall,
     setIsProcessing,
@@ -725,23 +980,35 @@ export function setupUnifiedAgentEventListeners(): void {
     // streamingMessage 只用于流式过程中的临时显示
 
     // 检查是否有暂存的问题需要添加
-    const pendingQuestion = pendingQuestions.get(data.taskId);
-    if (pendingQuestion && data.message.role === 'assistant') {
-      DEBUG && console.log('[UnifiedAgentStore] Adding pending question to new message:', data.message.id);
-      const { tasks, addQuestionToMessage } = useUnifiedAgentStore.getState();
-      const task = tasks.find((t) => t.id === data.taskId);
-      if (task) {
-        const messageIndex = task.messages.length - 1;
-        addQuestionToMessage(data.taskId, messageIndex, {
-          id: pendingQuestion.id,
-          question: pendingQuestion.question,
-          context: pendingQuestion.context,
-          status: 'pending',
-          options: pendingQuestion.options,
-        });
-        pendingQuestions.delete(data.taskId);
-        DEBUG && console.log('[UnifiedAgentStore] Pending question added to message:', data.message.id);
-      }
+    const pendingQuestionsList = pendingQuestions.get(data.taskId);
+    if (pendingQuestionsList && pendingQuestionsList.length > 0 && data.message.role === 'assistant') {
+      DEBUG && console.log('[UnifiedAgentStore] Adding pending questions to new message:', data.message.id, 'count:', pendingQuestionsList.length);
+      // 使用 setTimeout 确保消息已经被添加到状态中
+      setTimeout(() => {
+        const { tasks, addQuestionToMessage } = useUnifiedAgentStore.getState();
+        const task = tasks.find((t) => t.id === data.taskId);
+        if (task) {
+          // 找到刚添加的消息的索引（应该是最后一条消息）
+          const messageIndex = task.messages.findIndex(m => m.id === data.message.id);
+          if (messageIndex !== -1) {
+            // 添加所有 pending questions
+            pendingQuestionsList.forEach((pendingQuestion: any) => {
+              addQuestionToMessage(data.taskId, messageIndex, {
+                id: pendingQuestion.id,
+                question: pendingQuestion.question,
+                context: pendingQuestion.context,
+                status: 'pending',
+                options: pendingQuestion.options,
+                createdAt: Date.now(),
+              } as AgentQuestion);
+            });
+            pendingQuestions.delete(data.taskId);
+            DEBUG && console.log('[UnifiedAgentStore] Pending questions added to message:', data.message.id);
+          } else {
+            DEBUG && console.error('[UnifiedAgentStore] Could not find message with id:', data.message.id);
+          }
+        }
+      }, 0);
     }
   });
 
@@ -750,11 +1017,21 @@ export function setupUnifiedAgentEventListeners(): void {
     updateThinking(data.taskId, data.thinking);
   });
 
-  // 流式思考内容（追加）- 只处理当前活跃任务
+  // 流式思考内容（追加）- 实时更新到 streamingThinking 和最后一条消息，只处理当前活跃任务
   window.electronAPI?.unifiedAgent?.onStreamThinking?.((data: any) => {
-    const { activeTaskId } = useUnifiedAgentStore.getState();
+    const { activeTaskId, tasks } = useUnifiedAgentStore.getState();
     if (data.taskId === activeTaskId) {
+      // 更新流式思考（用于实时展示）
       appendStreamingThinking(data.thinking);
+      
+      // 同时更新最后一条AI消息的思考内容（用于历史记录保存）
+      const task = tasks.find(t => t.id === data.taskId);
+      if (task && task.messages.length > 0) {
+        const lastMessage = task.messages[task.messages.length - 1];
+        if (lastMessage.role === 'assistant') {
+          lastMessage.thinking = (lastMessage.thinking || '') + data.thinking;
+        }
+      }
     }
   });
 
@@ -779,32 +1056,76 @@ export function setupUnifiedAgentEventListeners(): void {
     const { activeTaskId } = useUnifiedAgentStore.getState();
     if (data.taskId === activeTaskId && data.content) {
       DEBUG && console.log('[UnifiedAgentStore] onStreamContent received:', data.content?.slice(0, 50), '...');
+
+      // 更新流式消息（用于实时展示）
       appendStreamingMessage(data.content);
+
+      // 注意：不在这里更新 task.messages，displayMessages 会使用 streamingMessage 来覆盖最后一条消息的内容
+      // 这样可以避免历史内容被重复追加
     }
   });
 
-  // 工具调用 - 添加到流式工具调用列表，只处理当前活跃任务
+  // 工具调用 - 添加到流式工具调用列表和最后一条消息，只处理当前活跃任务
   window.electronAPI?.unifiedAgent?.onToolCall?.((data: any) => {
-    const { activeTaskId } = useUnifiedAgentStore.getState();
+    const { activeTaskId, tasks } = useUnifiedAgentStore.getState();
     if (data.taskId === activeTaskId) {
+      // 添加到流式工具调用（用于实时展示）
       addStreamingToolCall(data.toolCall);
+
+      // 同时添加到最后一条AI消息的工具调用列表（用于历史记录保存）
+      // 添加时间戳确保历史渲染顺序正确
+      const task = tasks.find(t => t.id === data.taskId);
+      if (task && task.messages.length > 0) {
+        const lastMessage = task.messages[task.messages.length - 1];
+        if (lastMessage.role === 'assistant') {
+          if (!lastMessage.toolCalls) {
+            lastMessage.toolCalls = [];
+          }
+          lastMessage.toolCalls.push({
+            ...data.toolCall,
+            timestamp: Date.now(),
+          });
+        }
+      }
     }
   });
 
-  // 工具结果 - 更新流式工具调用，只处理当前活跃任务
+  // 工具结果 - 更新流式工具调用和最后一条消息中的工具调用，只处理当前活跃任务
   window.electronAPI?.unifiedAgent?.onToolResult?.((data: any) => {
-    const { activeTaskId, streamingToolCalls } = useUnifiedAgentStore.getState();
+    const { activeTaskId, streamingToolCalls, tasks } = useUnifiedAgentStore.getState();
     if (data.taskId === activeTaskId) {
       // 保留原始 params
       const existingToolCall = streamingToolCalls.find(tc => tc.id === data.toolCall.id);
       const params = existingToolCall?.params || data.toolCall.params || {};
+      
+      // 更新流式工具调用（用于实时展示）
       updateStreamingToolCall(data.toolCall.id, data.toolCall.result, data.toolCall.error, params);
+      
+      // 同时更新最后一条AI消息中的工具调用（用于历史记录保存）
+      const task = tasks.find(t => t.id === data.taskId);
+      if (task && task.messages.length > 0) {
+        const lastMessage = task.messages[task.messages.length - 1];
+        if (lastMessage.role === 'assistant' && lastMessage.toolCalls) {
+          const toolCall = lastMessage.toolCalls.find(tc => tc.id === data.toolCall.id);
+          if (toolCall) {
+            toolCall.status = data.toolCall.error ? 'error' : 'completed';
+            toolCall.result = data.toolCall.result;
+            toolCall.error = data.toolCall.error;
+          }
+        }
+      }
     }
   });
 
   // 待办更新
   window.electronAPI?.unifiedAgent?.onTodoUpdate?.((data: any) => {
-    updateTodoItems(data.taskId, data.items);
+    const { activeTaskId } = useUnifiedAgentStore.getState();
+    // 只更新当前活跃任务的待办事项
+    if (data.taskId === activeTaskId) {
+      updateTodoItems(data.taskId, data.items);
+      // 同时添加到流式内容块，实现实时渲染
+      addStreamingTodo(data.items);
+    }
   });
 
   // 暂存的问题（当 onQuestion 在 onMessage 之前触发时使用）
@@ -813,30 +1134,19 @@ export function setupUnifiedAgentEventListeners(): void {
   // 问题提问
   DEBUG && console.log('[UnifiedAgentStore] Registering onQuestion listener, available:', !!window.electronAPI?.unifiedAgent?.onQuestion);
   window.electronAPI?.unifiedAgent?.onQuestion?.((data: any) => {
-    DEBUG && console.log('[UnifiedAgentStore] onQuestion received:', data.question);
-    const { tasks, addQuestionToMessage } = useUnifiedAgentStore.getState();
-    const task = tasks.find((t) => t.id === data.taskId);
-    if (task) {
-      // 找到最近的 AI 消息的索引
-      const lastAssistantMessageIndex = [...task.messages].reverse().findIndex(m => m.role === 'assistant');
-      if (lastAssistantMessageIndex !== -1) {
-        const actualIndex = task.messages.length - 1 - lastAssistantMessageIndex;
-        const message = task.messages[actualIndex];
-        // 使用 action 添加问题
-        addQuestionToMessage(data.taskId, actualIndex, {
-          id: data.question.id,
-          question: data.question.question,
-          context: data.question.context,
-          status: 'pending',
-          options: data.question.options,
-        });
-        DEBUG && console.log('[UnifiedAgentStore] Question added to message:', message.id, 'total questions:', (message.agentQuestions?.length || 0) + 1);
-      } else {
-        // 没有找到消息，暂存问题，等 onMessage 到达后再添加
-        DEBUG && console.log('[UnifiedAgentStore] No assistant message found, queuing question for later:', data.question.id);
-        pendingQuestions.set(data.taskId, data.question);
-      }
-    }
+    DEBUG && console.log('[UnifiedAgentStore] onQuestion received:', data.question.id);
+    const { addStreamingQuestion } = useUnifiedAgentStore.getState();
+    
+    // 只添加到流式内容块，实现实时渲染
+    // 问题会在消息保存时自动从主进程的 pendingQuestions 添加到消息的 agentQuestions 中
+    addStreamingQuestion({
+      id: data.question.id,
+      question: data.question.question,
+      context: data.question.context,
+      status: 'pending',
+      options: data.question.options,
+      createdAt: Date.now(),
+    } as AgentQuestion);
   });
 
   // 状态变更
@@ -857,6 +1167,52 @@ export function setupUnifiedAgentEventListeners(): void {
   // 完成
   window.electronAPI?.unifiedAgent?.onComplete?.((data: any) => {
     DEBUG && console.log('Agent completed:', data.taskId);
+    // 重置处理状态
+    setIsProcessing(false);
+    // 确保最后的内容块和工具调用被保存到历史消息
+    const { streamingContentBlocks, streamingToolCalls } = useUnifiedAgentStore.getState();
+    useUnifiedAgentStore.setState((state) => {
+      const task = state.tasks.find(t => t.id === data.taskId);
+      if (task && task.messages.length > 0) {
+        const lastMessage = task.messages[task.messages.length - 1];
+        if (lastMessage.role === 'assistant') {
+          // 保存内容块（文本和思考内容）
+          if (streamingContentBlocks.length > 0) {
+            lastMessage.contentBlocks = [...streamingContentBlocks];
+          }
+          // 保存工具调用（包括文件写入工具）
+          if (streamingToolCalls.length > 0) {
+            const convertedToolCalls: AgentToolCall[] = streamingToolCalls.map(tc => ({
+              id: tc.id,
+              toolName: (tc as any).name || (tc as any).toolName || '',
+              params: (tc as any).parameters || (tc as any).params || {},
+              status: tc.status,
+              result: tc.result,
+              error: tc.error,
+            }));
+            if (!lastMessage.toolCalls) {
+              lastMessage.toolCalls = [];
+            }
+            // 避免重复添加相同的工具调用
+            const existingIds = new Set(lastMessage.toolCalls.map(tc => tc.id));
+            convertedToolCalls.forEach(tc => {
+              if (!existingIds.has(tc.id)) {
+                lastMessage.toolCalls!.push(tc);
+              }
+            });
+          }
+        }
+      }
+      // 更新任务执行进度
+      if (task) {
+        task.executionProgress = 100;
+      }
+      // 只更新当前活跃任务的全局状态
+      if (state.activeTaskId === data.taskId) {
+        state.isExecuting = false;
+        state.executionProgress = 100;
+      }
+    });
     clearStreaming();
   });
 
@@ -890,27 +1246,35 @@ export function setupUnifiedAgentEventListeners(): void {
     });
   });
 
-  // 任务完成时重置状态
-  window.electronAPI?.unifiedAgent?.onComplete?.((data: any) => {
-    DEBUG && console.log('[UnifiedAgentStore] Task completed:', data.taskId);
-    useUnifiedAgentStore.setState((state) => {
-      const task = state.tasks.find((t) => t.id === data.taskId);
-      if (task) {
-        task.executionProgress = 100;
-      }
-      // 只更新当前活跃任务的全局状态
-      if (state.activeTaskId === data.taskId) {
-        state.isExecuting = false;
-        state.executionProgress = 100;
-      }
-    });
-  });
-
   // 任务失败时重置状态
   window.electronAPI?.unifiedAgent?.onError?.((data: any) => {
     DEBUG && console.log('[UnifiedAgentStore] Task error:', data.error);
     useUnifiedAgentStore.setState({
       isExecuting: false,
+    });
+  });
+
+  // 文件打开事件 - 在 AI 生成文件时自动打开编辑器
+  window.electronAPI?.unifiedAgent?.onFileOpen?.((data: { filePath: string }) => {
+    DEBUG && console.log('[UnifiedAgentStore] onFileOpen received:', data.filePath);
+    import('../store/workspaceStore').then(({ useWorkspaceStore }) => {
+      useWorkspaceStore.getState().openFile(data.filePath).catch(console.error);
+    });
+  });
+
+  // 文件流式写入进度事件 - 实时更新编辑器内容
+  window.electronAPI?.unifiedAgent?.onFileProgress?.((data: { filePath: string; content: string; isComplete: boolean }) => {
+    DEBUG && console.log('[UnifiedAgentStore] onFileProgress received:', data.filePath, 'isComplete:', data.isComplete);
+    import('../store/workspaceStore').then(({ useWorkspaceStore }) => {
+      const { openFiles, updateFileContent, openFile } = useWorkspaceStore.getState();
+      const isOpen = openFiles.some((f: { path: string }) => f.path === data.filePath);
+      if (isOpen) {
+        updateFileContent(data.filePath, data.content);
+      } else {
+        openFile(data.filePath).then(() => {
+          updateFileContent(data.filePath, data.content);
+        }).catch(console.error);
+      }
     });
   });
 

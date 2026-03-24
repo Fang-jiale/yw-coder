@@ -457,12 +457,15 @@ export class SoloExecutor extends EventEmitter {
 
     // 如果有问题，创建修复任务
     if (reviewResult.issues.length > 0) {
+      const now = Date.now();
       for (const issue of reviewResult.issues) {
         this.task.todoItems.push({
-          id: `fix-${Date.now()}`,
+          id: `fix-${now}`,
           content: `修复: ${issue.description}`,
           status: 'pending',
           priority: issue.severity === 'high' ? 'high' : 'medium',
+          createdAt: now,
+          updatedAt: now,
         });
       }
       this.emit('todo:update', this.task.todoItems);
@@ -677,7 +680,9 @@ export class SoloExecutor extends EventEmitter {
           fullContent += chunk.content || '';
         }
       },
-      {}
+      {
+        isRunning: () => this.isRunning && !this.isPaused,
+      }
     );
 
     return fullContent;

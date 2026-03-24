@@ -201,7 +201,7 @@ ${workspaceInfo}
 - estimatedTime 以秒为单位估算`;
 
     let planContent = '';
-    
+
     await aiStreamService.streamExecute(
       prompt,
       this.context.workspacePath,
@@ -213,7 +213,9 @@ ${workspaceInfo}
           this.emit('thinking', chunk.content);
         }
       },
-      {}
+      {
+        isRunning: () => this.state.isRunning && !this.state.isPaused,
+      }
     );
 
     // 解析生成的计划
@@ -395,7 +397,7 @@ ${workspaceInfo}
    */
   private async executeAIStep(prompt: string, enableTools: boolean = false): Promise<string> {
     let result = '';
-    
+
     await aiStreamService.streamExecute(
       prompt,
       this.context.workspacePath,
@@ -406,7 +408,9 @@ ${workspaceInfo}
           result += chunk.content || '';
         }
       },
-      enableTools ? {} : undefined
+      {
+        isRunning: () => this.state.isRunning && !this.state.isPaused,
+      }
     );
 
     // 添加到对话历史

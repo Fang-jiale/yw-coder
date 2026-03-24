@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { FolderOpen, MessageSquare, Code, Sparkles, Clock, X, Zap, Terminal, FileCode, Wand2 } from 'lucide-react';
+import { FolderOpen, MessageSquare, Code, Sparkles, Clock, X, Zap, Terminal, FileCode, Wand2, Bot, Code2 } from 'lucide-react';
 
 interface WelcomeScreenProps {
   onOpenFolder: () => void;
@@ -71,13 +71,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           {/* 打开文件夹 */}
           <button
             onClick={onOpenFolder}
-            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300"
+            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300 relative overflow-hidden"
           >
-            <div className="w-14 h-14 rounded-xl bg-primary/10 flex items-center justify-center mb-3 group-hover:bg-primary/20 transition-colors">
-              <FolderOpen className="w-7 h-7 text-primary" />
+            <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-500/10 to-blue-500/20 flex items-center justify-center mb-3 group-hover:scale-110 group-hover:shadow-lg transition-all duration-300">
+              <FolderOpen className="w-7 h-7 text-blue-500" />
             </div>
-            <h3 className="text-base font-semibold mb-1">打开文件夹</h3>
-            <p className="text-xs text-muted-foreground text-center">
+            <h3 className="text-base font-semibold mb-1 relative z-10">打开文件夹</h3>
+            <p className="text-xs text-muted-foreground text-center relative z-10">
               打开已有项目
             </p>
           </button>
@@ -85,13 +86,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           {/* 快速开始 */}
           <button
             onClick={onQuickStart}
-            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300"
+            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300 relative overflow-hidden"
           >
-            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary/20 to-blue-500/20 flex items-center justify-center mb-3 group-hover:from-primary/30 group-hover:to-blue-500/30 transition-colors">
-              <Wand2 className="w-7 h-7 text-primary" />
+            <div className="absolute inset-0 bg-gradient-to-br from-purple-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-purple-500/10 to-purple-500/20 flex items-center justify-center mb-3 group-hover:scale-110 group-hover:shadow-lg transition-all duration-300">
+              <Wand2 className="w-7 h-7 text-purple-500" />
             </div>
-            <h3 className="text-base font-semibold mb-1">快速开始</h3>
-            <p className="text-xs text-muted-foreground text-center">
+            <h3 className="text-base font-semibold mb-1 relative z-10">快速开始</h3>
+            <p className="text-xs text-muted-foreground text-center relative z-10">
               AI生成新项目
             </p>
           </button>
@@ -99,13 +101,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           {/* 跳过 - 直接进入AI对话 */}
           <button
             onClick={handleSkipWelcome}
-            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300"
+            className="group flex flex-col items-center p-6 rounded-2xl border border-border bg-card/50 hover:bg-card hover:border-primary/50 hover:shadow-lg transition-all duration-300 relative overflow-hidden"
           >
-            <div className="w-14 h-14 rounded-xl bg-muted/50 flex items-center justify-center mb-3 group-hover:bg-muted transition-colors">
-              <MessageSquare className="w-7 h-7 text-muted-foreground" />
+            <div className="absolute inset-0 bg-gradient-to-br from-green-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-green-500/10 to-green-500/20 flex items-center justify-center mb-3 group-hover:scale-110 group-hover:shadow-lg transition-all duration-300">
+              <MessageSquare className="w-7 h-7 text-green-500" />
             </div>
-            <h3 className="text-base font-semibold mb-1">AI 对话</h3>
-            <p className="text-xs text-muted-foreground text-center">
+            <h3 className="text-base font-semibold mb-1 relative z-10">AI 对话</h3>
+            <p className="text-xs text-muted-foreground text-center relative z-10">
               直接开始对话
             </p>
           </button>
@@ -146,39 +149,39 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
 
         {/* Features - 优化展示 */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/30">
-            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <MessageSquare className="w-4 h-4 text-primary" />
+          <div className="group flex items-center gap-3 p-3 rounded-lg bg-gradient-to-br from-blue-500/5 to-blue-500/10 border border-transparent hover:border-blue-500/20 transition-all cursor-pointer">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500/10 to-blue-500/20 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <MessageSquare className="w-5 h-5 text-blue-500" />
             </div>
             <div>
-              <h4 className="text-sm font-medium">AI 对话</h4>
+              <h4 className="text-sm font-semibold">AI 对话</h4>
               <p className="text-xs text-muted-foreground">智能问答</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/30">
-            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Code className="w-4 h-4 text-primary" />
+          <div className="group flex items-center gap-3 p-3 rounded-lg bg-gradient-to-br from-purple-500/5 to-purple-500/10 border border-transparent hover:border-purple-500/20 transition-all cursor-pointer">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500/10 to-purple-500/20 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Bot className="w-5 h-5 text-purple-500" />
             </div>
             <div>
-              <h4 className="text-sm font-medium">代码补全</h4>
-              <p className="text-xs text-muted-foreground">智能提示</p>
+              <h4 className="text-sm font-semibold">代码构建</h4>
+              <p className="text-xs text-muted-foreground">结构化开发</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/30">
-            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Zap className="w-4 h-4 text-primary" />
+          <div className="group flex items-center gap-3 p-3 rounded-lg bg-gradient-to-br from-green-500/5 to-green-500/10 border border-transparent hover:border-green-500/20 transition-all cursor-pointer">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-green-500/10 to-green-500/20 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Zap className="w-5 h-5 text-green-500" />
             </div>
             <div>
-              <h4 className="text-sm font-medium">Builder</h4>
-              <p className="text-xs text-muted-foreground">项目生成</p>
+              <h4 className="text-sm font-semibold">Solo Coder</h4>
+              <p className="text-xs text-muted-foreground">自主开发</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/30">
-            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Terminal className="w-4 h-4 text-primary" />
+          <div className="group flex items-center gap-3 p-3 rounded-lg bg-gradient-to-br from-amber-500/5 to-amber-500/10 border border-transparent hover:border-amber-500/20 transition-all cursor-pointer">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500/10 to-amber-500/20 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Terminal className="w-5 h-5 text-amber-500" />
             </div>
             <div>
-              <h4 className="text-sm font-medium">终端</h4>
+              <h4 className="text-sm font-semibold">终端</h4>
               <p className="text-xs text-muted-foreground">集成命令行</p>
             </div>
           </div>

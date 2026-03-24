@@ -8,7 +8,6 @@ const execAsync = promisify(exec);
 // 扩展工具类型
 export type ToolName = 
   | 'read_file' 
-  | 'write_file'
   | 'edit_file'
   | 'search_files' 
   | 'list_files'
@@ -64,24 +63,6 @@ export const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['file_path'],
-    },
-  },
-  {
-    name: 'write_file',
-    description: '创建新文件或覆盖写入文件内容',
-    parameters: {
-      type: 'object',
-      properties: {
-        file_path: {
-          type: 'string',
-          description: '文件路径（相对于工作区）',
-        },
-        content: {
-          type: 'string',
-          description: '文件内容',
-        },
-      },
-      required: ['file_path', 'content'],
     },
   },
   {
@@ -285,8 +266,6 @@ export class AIToolService {
       switch (tool) {
         case 'read_file':
           return await this.readFile(params.file_path, params.offset, params.limit);
-        case 'write_file':
-          return await this.writeFile(params.file_path, params.content);
         case 'edit_file':
           return await this.editFile(params.file_path, params.old_string, params.new_string);
         case 'search_files':
@@ -348,24 +327,6 @@ export class AIToolService {
       tool: 'read_file',
       success: true,
       data: { content, file_path: filePath },
-    };
-  }
-
-  /**
-   * 写入文件
-   */
-  private async writeFile(filePath: string, content: string): Promise<ToolResult> {
-    const fullPath = path.join(this.workspacePath, filePath);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, content, 'utf-8');
-
-    // 通知前端
-    this.notifyFileChange(filePath, content);
-
-    return {
-      tool: 'write_file',
-      success: true,
-      data: { file_path: filePath, bytes_written: content.length },
     };
   }
 

@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { AIProviderConfig } from '../../shared/types';
-import { PREDEFINED_PROVIDERS } from './aiService';
+import { PREDEFINED_PROVIDERS } from './aiProvider';
 import { AIToolService, ToolCall, ToolResult } from './aiToolService';
 
 export interface AgentMessage {

@@ -10,14 +10,11 @@ import {
   AgentMessage,
   AgentToolCall,
   AgentCallbacks,
-  AgentRuntimeMode,
   AgentContext,
   GeneratedFile,
   TodoItem,
   AgentError,
-  MODE_BEHAVIOR_CONFIGS,
-  MODE_CAPABILITY_CONFIGS,
-  SYSTEM_PROMPT_TEMPLATES,
+  BUILT_IN_AGENTS,
 } from '../../shared/agentTypes';
 import { aiStreamService, StreamChunk } from '../services/aiStreamService';
 import { AIToolService } from '../services/aiToolService';
@@ -68,18 +65,18 @@ export class UnifiedAgent {
 
     try {
       // 根据运行模式执行不同的逻辑
-      switch (this.config.runtimeMode) {
+      switch (this.config.type) {
         case 'chat':
           await this.executeChatMode();
           break;
-        case 'agent':
+        case 'builder':
           await this.executeAgentMode();
           break;
-        case 'solo':
+        case 'solocoder':
           await this.executeSoloMode();
           break;
         default:
-          throw new Error(`Unknown runtime mode: ${this.config.runtimeMode}`);
+          throw new Error(`Unknown runtime mode: ${this.config.type}`);
       }
 
       if (!this.isPaused) {
@@ -421,14 +418,16 @@ export class UnifiedAgent {
             this.callbacks.onToolCall?.(toolCall);
             break;
           case 'tool_end':
-            this.callbacks.onToolResult?.({
-              id: chunk.toolCallId || Date.now().toString(),
-              toolName: chunk.toolName || '',
-              params: {},
-              status: chunk.toolResult?.success ? 'completed' : 'error',
-              result: chunk.toolResult?.data,
-              error: chunk.toolResult?.error,
-            });
+            this.callbacks.onToolResult?.(
+              chunk.toolCallId || Date.now().toString(),
+              {
+                toolName: chunk.toolName || '',
+                params: {},
+                status: chunk.toolResult?.success ? 'completed' : 'error',
+                result: chunk.toolResult?.data,
+                error: chunk.toolResult?.error,
+              }
+            );
             break;
           case 'done':
             const message: AgentMessage = {
@@ -460,6 +459,7 @@ export class UnifiedAgent {
               role: m.role as 'user' | 'assistant',
               content: m.content,
             })),
+          isRunning: () => this.isRunning && !this.isPaused,
         }
       );
     });
@@ -492,20 +492,27 @@ export class UnifiedAgent {
             break;
           case 'tool_end':
             if (chunk.toolResult) {
-              this.callbacks.onToolResult?.({
-                id: chunk.toolCallId || Date.now().toString(),
-                toolName: chunk.toolName || '',
-                params: {},
-                status: chunk.toolResult.success ? 'completed' : 'error',
-                result: chunk.toolResult.data,
-                error: chunk.toolResult.error,
-              });
+              this.callbacks.onToolResult?.(
+                chunk.toolCallId || Date.now().toString(),
+                {
+                  toolName: chunk.toolName || '',
+                  params: {},
+                  status: chunk.toolResult.success ? 'completed' : 'error',
+                  result: chunk.toolResult.data,
+                  error: chunk.toolResult.error,
+                }
+              );
             }
             break;
           case 'todo_update':
             if (chunk.todoItems) {
-              this.task.todoItems = chunk.todoItems;
-              this.callbacks.onTodoUpdate?.(chunk.todoItems);
+              const now = Date.now();
+              this.task.todoItems = chunk.todoItems.map(item => ({
+                ...item,
+                createdAt: (item as any).createdAt || now,
+                updatedAt: now,
+              }));
+              this.callbacks.onTodoUpdate?.(this.task.todoItems);
             }
             break;
           case 'agent_question':
@@ -513,6 +520,7 @@ export class UnifiedAgent {
               this.callbacks.onQuestion?.({
                 ...chunk.question,
                 status: 'pending',
+                createdAt: Date.now(),
               });
             }
             break;
@@ -529,7 +537,10 @@ export class UnifiedAgent {
         prompt,
         this.task.workspacePath,
         this.config.aiConfig,
-        handleChunk
+        handleChunk,
+        {
+          isRunning: () => this.isRunning && !this.isPaused,
+        }
       );
     });
   }
@@ -871,8 +882,9 @@ export function createUnifiedAgent(
     id: `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
     title,
     description,
+    agentId: config.id,
     configId: config.id,
-    runtimeMode: config.runtimeMode,
+    agentType: config.type,
     workspacePath,
     status: 'pending',
     steps: [],

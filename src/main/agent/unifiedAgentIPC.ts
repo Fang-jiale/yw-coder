@@ -8,11 +8,14 @@ import {
   AgentConfig,
   AgentTask,
   AgentMessage,
-  createDefaultAgentConfig,
+  AgentQuestion,
+  createAgentConfig,
+  TodoItem,
 } from '../../shared/agentTypes';
 import { AIProviderConfig } from '../../shared/types';
 import { aiStreamService, StreamChunk } from '../services/aiStreamService';
 import { DynamicSoloExecutor, ExecutionPlan, ExecutionPlanStep } from './solo/DynamicSoloExecutor';
+import { BuilderExecutor, BuildPlan, BuildStep } from './builder/BuilderExecutor';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -25,6 +28,7 @@ const activeTasks: Map<string, {
   config: AgentConfig;
   webContents: any;
   isRunning: boolean;
+  isPaused: boolean;
   // 保存 executor 实例以便暂停/恢复操作
   soloExecutor?: DynamicSoloExecutor;
   agentExecutor?: any;
@@ -46,26 +50,94 @@ async function updateTaskOnDisk(updatedTask: AgentTask): Promise<void> {
   }
 }
 
-// 获取存储目录 - 使用可写的目录
+// 获取存储目录 - 使用可写的目录（支持多个备选路径）
 const getDataDir = () => {
-  try {
-    const testPath = path.join(app.getPath('userData'), '.test-write');
-    require('fs').writeFileSync(testPath, 'test');
-    require('fs').unlinkSync(testPath);
-    return path.join(app.getPath('userData'), 'agent-data');
-  } catch {
-    return path.join(process.cwd(), '.ywcoder-agent-data');
+  const possiblePaths = [
+    // 首选：Electron 标准用户数据目录
+    (() => {
+      try {
+        return app.getPath('userData');
+      } catch {
+        return null;
+      }
+    })(),
+    // 备选1：应用所在目录
+    process.cwd(),
+    // 备选2：用户主目录
+    require('os').homedir(),
+    // 备选3：临时目录
+    require('os').tmpdir(),
+  ].filter(Boolean) as string[];
+
+  for (const basePath of possiblePaths) {
+    try {
+      const testPath = path.join(basePath, '.test-write');
+      const agentDataPath = path.join(basePath, 'agent-data');
+      
+      // 确保目录存在
+      if (!require('fs').existsSync(basePath)) {
+        require('fs').mkdirSync(basePath, { recursive: true });
+      }
+      
+      // 测试写入权限
+      require('fs').writeFileSync(testPath, 'test');
+      require('fs').unlinkSync(testPath);
+      
+      DEBUG && console.log('[UnifiedAgentIPC] Using data dir:', agentDataPath);
+      return agentDataPath;
+    } catch (e) {
+      DEBUG && console.warn('[UnifiedAgentIPC] Path not writable:', basePath);
+      continue;
+    }
   }
+
+  // 如果所有路径都失败，使用临时目录（最后手段）
+  const fallbackPath = path.join(require('os').tmpdir(), 'ywcoder-agent-data');
+  console.error('[UnifiedAgentIPC] No writable path found, using fallback:', fallbackPath);
+  return fallbackPath;
 };
 
 // 获取 AI 配置
 async function getAIConfigs(): Promise<AIProviderConfig[]> {
   try {
     const dataDir = getDataDir();
-    const settingsPath = path.join(dataDir.replace('agent-data', 'config'), 'settings.json');
-    const data = await fs.readFile(settingsPath, 'utf-8');
-    const settings = JSON.parse(data);
-    return settings.aiConfigs || [];
+
+    // 尝试多个可能的配置路径
+    const possiblePaths = [
+      path.join(dataDir.replace('agent-data', 'config'), 'settings.json'),
+      path.join(dataDir.replace('agent-data', ''), 'config.json'),
+      path.join(dataDir.replace('agent-data', ''), 'config', 'settings.json'),
+    ];
+
+    for (const configPath of possiblePaths) {
+      try {
+        const data = await fs.readFile(configPath, 'utf-8');
+        const settings = JSON.parse(data);
+
+        // 检查 settings.json 格式
+        if (settings.aiConfigs && Array.isArray(settings.aiConfigs)) {
+          return settings.aiConfigs;
+        }
+
+        // 检查 config.json 格式（旧的配置格式）
+        if (settings.settings?.aiApiKey) {
+          return [{
+            id: 'default-ai-config',
+            name: 'Default AI Config',
+            provider: 'openai',
+            apiKey: settings.settings.aiApiKey,
+            model: settings.settings.aiModel || 'gpt-4',
+            baseUrl: settings.settings.baseUrl,
+            groupId: settings.settings.groupId,
+            isDefault: true,
+          }];
+        }
+      } catch {
+        // 继续尝试下一个路径
+      }
+    }
+
+    return [];
   } catch {
     return [];
   }
@@ -271,23 +343,36 @@ export function registerUnifiedAgentIPC(): void {
     try {
       // 加载配置
       let configs = await loadConfigs();
+      console.log(`[agent:task:start] Loaded ${configs.length} configs`);
+
       let config = configs.find(c => c.id === configId);
 
       // 如果配置不存在，尝试使用第一个可用配置
       if (!config && configs.length > 0) {
         config = configs[0];
+        console.log(`[agent:task:start] Config not found for ${configId}, using first available: ${config.id}`);
       }
 
       if (!config) {
-        throw new Error('Config not found');
+        console.error(`[agent:task:start] No config found for ${configId} and no configs available`);
+        throw new Error('Config not found. Please configure an AI provider first.');
       }
+
+      // 检查 AI 配置
+      if (!config.aiConfig) {
+        console.error(`[agent:task:start] Config ${config.id} has no aiConfig`);
+        throw new Error('Agent config is missing AI configuration. Please reconfigure the agent.');
+      }
+
+      console.log(`[agent:task:start] Using config: ${config.id}, type: ${config.type}, aiConfig: ${config.aiConfig.model || 'unknown'}`);
 
       const task: AgentTask = {
         id: `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         title,
         description,
+        agentId: config.id,
         configId: config.id, // 使用实际找到的配置ID
-        runtimeMode: config.runtimeMode,
+        agentType: config.type,
         status: 'pending',
         workspacePath,
         steps: [],
@@ -311,6 +396,7 @@ export function registerUnifiedAgentIPC(): void {
         config,
         webContents: event.sender,
         isRunning: false,
+        isPaused: false,
       });
 
       // 保存任务到磁盘
@@ -338,16 +424,17 @@ export function registerUnifiedAgentIPC(): void {
       throw new Error('Task is already running');
     }
 
-    console.log(`[UnifiedAgentIPC] Starting task: ${taskId}, mode: ${session.config.runtimeMode}`);
+    console.log(`[UnifiedAgentIPC] Starting task: ${taskId}, agentType: ${session.config.type}`);
 
     session.isRunning = true;
+    session.isPaused = false;
     session.task.status = 'running';
     session.task.updatedAt = Date.now();
 
     // 立即返回成功，异步执行实际任务
     // 根据模式执行不同的处理逻辑
-    switch (session.config.runtimeMode) {
-      case 'solo':
+    switch (session.config.type) {
+      case 'solocoder':
         // SOLO 模式：异步执行，不阻塞 IPC 响应
         executeSoloMode(session).catch(error => {
           console.error(`[UnifiedAgentIPC] SOLO mode execution error:`, error);
@@ -363,7 +450,7 @@ export function registerUnifiedAgentIPC(): void {
           });
         });
         break;
-      case 'agent':
+      case 'builder':
         // Agent 模式：异步执行
         executeAgentMode(session).catch(error => {
           console.error(`[UnifiedAgentIPC] Agent mode execution error:`, error);
@@ -384,7 +471,7 @@ export function registerUnifiedAgentIPC(): void {
         break;
     }
 
-    return { success: true, taskId, mode: session.config.runtimeMode };
+    return { success: true, taskId, mode: session.config.type };
   });
 
   // 发送消息 (仅 Chat 模式使用)
@@ -404,6 +491,7 @@ export function registerUnifiedAgentIPC(): void {
             config,
             webContents: null,
             isRunning: false,
+            isPaused: false,
           };
           activeTasks.set(taskId, session);
           console.log('[UnifiedAgentIPC] Session restored from disk');
@@ -418,7 +506,7 @@ export function registerUnifiedAgentIPC(): void {
     }
 
     // 只有 Chat 模式使用 send-message，SOLO 和 Agent 模式使用 start-task
-    if (session.config.runtimeMode !== 'chat') {
+    if (session.config.type !== 'chat') {
       // 对于 SOLO 和 Agent 模式，只需添加消息，不执行 Chat 逻辑
       const userMessage: AgentMessage = {
         id: Date.now().toString(),
@@ -449,6 +537,7 @@ export function registerUnifiedAgentIPC(): void {
     }
 
     session.isRunning = false;
+    session.isPaused = true;
     session.task.status = 'paused';
     session.task.updatedAt = Date.now();
 
@@ -476,15 +565,16 @@ export function registerUnifiedAgentIPC(): void {
     }
 
     session.isRunning = true;
+    session.isPaused = false;
     session.task.status = 'running';
     session.task.updatedAt = Date.now();
 
     // 根据模式恢复执行
-    switch (session.config.runtimeMode) {
-      case 'solo':
+    switch (session.config.type) {
+      case 'solocoder':
         await executeSoloMode(session);
         break;
-      case 'agent':
+      case 'builder':
         await executeAgentMode(session);
         break;
     }
@@ -500,6 +590,7 @@ export function registerUnifiedAgentIPC(): void {
     }
 
     session.isRunning = false;
+    session.isPaused = false;
     session.task.status = 'failed';
     session.task.updatedAt = Date.now();
 
@@ -579,11 +670,13 @@ export function registerUnifiedAgentIPC(): void {
   });
 
   // 回答 Agent 问题
-  ipcMain.handle('agent:task:answer', (_, { taskId, questionId, answer }: { taskId: string; questionId: string; answer: string }) => {
+  ipcMain.handle('agent:task:answer', async (_, { taskId, questionId, answer }: { taskId: string; questionId: string; answer: string }) => {
     const session = activeTasks.get(taskId);
     if (!session) {
       throw new Error('Task not found');
     }
+
+    console.log('[agent:task:answer] Answering question:', questionId, 'with:', answer);
 
     // 更新问题状态
     const message = session.task.messages.find(m => m.agentQuestions?.some(q => q.id === questionId));
@@ -593,6 +686,34 @@ export function registerUnifiedAgentIPC(): void {
         question.status = 'answered';
         question.answer = answer;
       }
+    }
+
+    // 添加用户回答作为新的用户消息
+    const userMessage: AgentMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: answer,
+      timestamp: Date.now(),
+    };
+    session.task.messages.push(userMessage);
+
+    // 广播用户消息到渲染进程
+    broadcastToRenderer('agent:event:message', {
+      taskId,
+      message: userMessage,
+    });
+
+    // 立即保存任务到磁盘，确保用户回答被持久化
+    await updateTaskOnDisk(session.task);
+
+    // 继续 AI 对话
+    console.log('[agent:task:answer] Continuing AI conversation...');
+    try {
+      // 重新启动对话流，传入 AI 配置
+      await executeChatMode(session, '', session.config.aiConfig);
+    } catch (error) {
+      console.error('[agent:task:answer] Error continuing conversation:', error);
+      throw error;
     }
 
     return { success: true };
@@ -621,6 +742,22 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
   // 使用传入的 AI 配置，如果没有则使用 session 中的配置
   const effectiveAIConfig = aiConfig || config.aiConfig;
 
+  // 设置 isRunning 为 true，确保 isRunning 检查通过
+  session.isRunning = true;
+  session.isPaused = false;
+
+  // 添加用户消息到任务历史（如果 content 不为空）
+  if (content) {
+    const userMessage: AgentMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content,
+      timestamp: Date.now(),
+    };
+    task.messages.push(userMessage);
+    DEBUG && console.log(`[executeChatMode] User message added to task:`, userMessage.id);
+  }
+
   return new Promise((resolve, reject) => {
     let fullContent = '';
     let thinking = '';
@@ -633,6 +770,10 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
       result?: any;
       error?: string;
     }> = [];
+    // 暂存的问题，将在 AI 消息创建时添加
+    const pendingQuestions: AgentQuestion[] = [];
+    // 累积 todo 信息，用于保存到历史消息
+    let lastTodoItems: TodoItem[] = [];
 
     const handleChunk = (chunk: StreamChunk) => {
       switch (chunk.type) {
@@ -706,23 +847,48 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
         }
         case 'todo_update':
           if (chunk.todoItems) {
+            // 添加 createdAt 和 updatedAt 字段以符合 TodoItem 类型
+            lastTodoItems = chunk.todoItems.map((item: any) => ({
+              ...item,
+              createdAt: item.createdAt || Date.now(),
+              updatedAt: item.updatedAt || Date.now(),
+            }));
             broadcastToRenderer('agent:event:todo-update', {
               taskId: task.id,
-              items: chunk.todoItems,
+              items: lastTodoItems,
             });
           }
           break;
         case 'agent_question':
           if (chunk.question) {
+            // 暂存问题，将在 AI 消息创建时添加
+            const fullQuestion: AgentQuestion = {
+              ...chunk.question,
+              status: 'pending',
+              createdAt: Date.now(),
+            };
+            pendingQuestions.push(fullQuestion);
+            DEBUG && console.log(`[executeChatMode] Question received, queued:`, fullQuestion.id, 'pending count:', pendingQuestions.length);
+            
             broadcastToRenderer('agent:event:question', {
               taskId: task.id,
-              question: chunk.question,
+              question: fullQuestion,
             });
           }
           break;
         case 'done': {
-          // 添加 AI 消息，包含工具调用
-          DEBUG && console.log(`[executeChatMode] Saving AI message with ${toolCalls.length} toolCalls`);
+          // 添加 AI 消息，包含工具调用和暂存的问题
+          DEBUG && console.log(`[executeChatMode] Saving AI message with ${toolCalls.length} toolCalls, ${pendingQuestions.length} questions`);
+          // 构建 contentBlocks，包含 todo 信息
+          const contentBlocks: Array<{ type: 'text' | 'thinking' | 'question' | 'todo'; content?: string; thinking?: string; question?: AgentQuestion; todoItems?: TodoItem[]; timestamp: number }> = [];
+          if (lastTodoItems.length > 0) {
+            contentBlocks.push({
+              type: 'todo',
+              todoItems: lastTodoItems,
+              timestamp: Date.now(),
+            });
+          }
+
           const aiMessage: AgentMessage = {
             id: Date.now().toString(),
             role: 'assistant',
@@ -730,9 +896,11 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
             timestamp: Date.now(),
             thinking,
             toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+            agentQuestions: pendingQuestions.length > 0 ? pendingQuestions : undefined,
+            contentBlocks: contentBlocks.length > 0 ? contentBlocks : undefined,
           };
           task.messages.push(aiMessage);
-          DEBUG && console.log(`[executeChatMode] AI message saved with toolCalls:`, aiMessage.toolCalls?.length);
+          DEBUG && console.log(`[executeChatMode] AI message saved with toolCalls:`, aiMessage.toolCalls?.length, 'questions:', aiMessage.agentQuestions?.length);
 
           session.isRunning = false;
           task.status = 'completed';
@@ -786,7 +954,7 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
       task.workspacePath,
       effectiveAIConfig,
       handleChunk,
-      { history }
+      { history, isRunning: () => session.isRunning && !session.isPaused }
     ).catch(async (error: any) => {
       console.error('[executeChatMode] streamExecute error:', error);
       session.isRunning = false;
@@ -802,67 +970,160 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
 }
 
 /**
- * 执行 Agent 模式
+ * 执行 Agent 模式 (Builder 模式)
+ * 使用 BuilderExecutor 实现 Plan-Build-Review 循环
  */
 async function executeAgentMode(session: any): Promise<void> {
-  const { task } = session;
+  const { task, config } = session;
 
-  // Agent 模式：执行 Plan-Build-Review 循环
-  broadcastToRenderer('agent:event:step-start', {
-    taskId: task.id,
-    step: {
-      id: `step-${Date.now()}`,
-      type: 'analysis',
-      description: '分析任务需求',
-      status: 'in_progress',
-      startTime: Date.now(),
-    },
-  });
+  console.log(`[executeAgentMode] Starting Builder mode with BuilderExecutor for task: ${task.id}`);
+  console.log(`[executeAgentMode] Config: ${config?.id}, type: ${config?.type}`);
+  console.log(`[executeAgentMode] AI Config: ${config?.aiConfig ? config.aiConfig.model : 'MISSING'}`);
 
-  // 获取最后一条用户消息作为输入
-  const lastUserMessage = task.messages.filter((m: AgentMessage) => m.role === 'user').pop();
-  if (!lastUserMessage) {
+  // 检查配置
+  if (!config?.aiConfig) {
+    console.error('[executeAgentMode] ERROR: Config or aiConfig is missing!');
+    broadcastToRenderer('agent:event:error', {
+      taskId: task.id,
+      error: 'AI configuration is missing. Please configure an AI provider first.'
+    });
+    throw new Error('AI configuration is missing');
+  }
+
+  try {
+    // 创建 BuilderExecutor 实例
+    const executor = new BuilderExecutor(task, config);
+    
+    // 保存 executor 实例到 session，以便暂停/恢复操作
+    session.agentExecutor = executor;
+
+    // 设置事件监听
+    executor.on('phase:start', (phase: string) => {
+      broadcastToRenderer('agent:event:phase-start', {
+        taskId: task.id,
+        phase,
+      });
+    });
+
+    executor.on('phase:complete', (phase: string) => {
+      broadcastToRenderer('agent:event:phase-complete', {
+        taskId: task.id,
+        phase,
+      });
+    });
+
+    executor.on('step:start', (step: BuildStep) => {
+      broadcastToRenderer('agent:event:step-start', {
+        taskId: task.id,
+        step: {
+          id: step.id,
+          type: step.phase,
+          description: step.description,
+          status: 'in_progress',
+          startTime: step.startTime,
+        },
+      });
+    });
+
+    executor.on('step:complete', (step: BuildStep) => {
+      broadcastToRenderer('agent:event:step-complete', {
+        taskId: task.id,
+        step: {
+          id: step.id,
+          type: step.phase,
+          description: step.description,
+          status: 'completed',
+          endTime: step.endTime,
+        },
+      });
+    });
+
+    executor.on('step:error', (step: BuildStep, error: string) => {
+      broadcastToRenderer('agent:event:step-fail', {
+        taskId: task.id,
+        step: {
+          id: step.id,
+          type: step.phase,
+          description: step.description,
+          status: 'failed',
+          endTime: Date.now(),
+        },
+        error,
+      });
+    });
+
+    executor.on('status', (message: string) => {
+      broadcastToRenderer('agent:event:progress', {
+        taskId: task.id,
+        message,
+      });
+    });
+
+    executor.on('thinking', (content: string) => {
+      broadcastToRenderer('agent:event:thinking', {
+        taskId: task.id,
+        content,
+      });
+    });
+
+    executor.on('content', (content: string) => {
+      broadcastToRenderer('agent:event:content', {
+        taskId: task.id,
+        content,
+      });
+    });
+
+    executor.on('tool:start', (toolCall: any) => {
+      broadcastToRenderer('agent:event:tool-start', {
+        taskId: task.id,
+        toolCall,
+      });
+    });
+
+    executor.on('tool:end', (result: any) => {
+      broadcastToRenderer('agent:event:tool-end', {
+        taskId: task.id,
+        result,
+      });
+    });
+
+    executor.on('message', (message: AgentMessage) => {
+      broadcastToRenderer('agent:event:message', {
+        taskId: task.id,
+        message,
+      });
+    });
+
+    executor.on('complete', (result: any) => {
+      console.log(`[BuilderExecutor] Build completed:`, result);
+      session.isRunning = false;
+      task.status = 'completed';
+      broadcastToRenderer('agent:event:complete', { 
+        taskId: task.id,
+        result,
+      });
+    });
+
+    executor.on('error', (error: string) => {
+      console.error(`[BuilderExecutor] Build error:`, error);
+      session.isRunning = false;
+      task.status = 'failed';
+      broadcastToRenderer('agent:event:error', { 
+        taskId: task.id, 
+        error 
+      });
+    });
+
+    // 开始执行
+    await executor.execute();
+
+  } catch (error: any) {
+    console.error(`[executeAgentMode] Error:`, error);
     session.isRunning = false;
     task.status = 'failed';
     broadcastToRenderer('agent:event:error', { 
       taskId: task.id, 
-      error: 'No user message found' 
-    });
-    return;
-  }
-
-  try {
-    // 执行分析步骤
-    await executeChatMode(session, lastUserMessage.content);
-    
-    // 标记步骤完成
-    broadcastToRenderer('agent:event:step-complete', {
-      taskId: task.id,
-      step: {
-        id: `step-${Date.now()}`,
-        type: 'analysis',
-        description: '分析任务需求',
-        status: 'completed',
-        endTime: Date.now(),
-      },
-    });
-
-    session.isRunning = false;
-    task.status = 'completed';
-    broadcastToRenderer('agent:event:complete', { taskId: task.id });
-  } catch (error: any) {
-    session.isRunning = false;
-    task.status = 'failed';
-    broadcastToRenderer('agent:event:step-fail', {
-      taskId: task.id,
-      step: {
-        id: `step-${Date.now()}`,
-        type: 'analysis',
-        description: '分析任务需求',
-        status: 'failed',
-        endTime: Date.now(),
-      },
-      error: error.message,
+      error: error.message 
     });
   }
 }
@@ -875,6 +1136,32 @@ async function executeSoloMode(session: any): Promise<void> {
   const { task, config } = session;
 
   console.log(`[executeSoloMode] Starting SOLO mode with DynamicSoloExecutor for task: ${task.id}`);
+
+  // 创建初始 AI 消息用于流式展示
+  const aiMessage: AgentMessage = {
+    id: `solo-${Date.now()}`,
+    role: 'assistant',
+    content: '',
+    timestamp: Date.now(),
+  };
+  task.messages.push(aiMessage);
+  broadcastToRenderer('agent:event:message', {
+    taskId: task.id,
+    message: aiMessage,
+  });
+
+  // 累积流式内容
+  let accumulatedContent = '';
+  let accumulatedThinking = '';
+  // 累积工具调用，用于保存到历史消息（与 chat 模式保持一致）
+  const toolCalls: Array<{
+    id: string;
+    toolName: string;
+    params: any;
+    status: 'running' | 'completed' | 'error';
+    result?: any;
+    error?: string;
+  }> = [];
 
   try {
     // 创建 DynamicSoloExecutor 实例
@@ -891,6 +1178,26 @@ async function executeSoloMode(session: any): Promise<void> {
       });
     });
 
+    // 监听内容事件，累积到 AI 消息
+    executor.on('content', (content: string) => {
+      accumulatedContent += content;
+      // 更新 AI 消息内容
+      aiMessage.content = accumulatedContent;
+      broadcastToRenderer('agent:event:stream-content', {
+        taskId: task.id,
+        content,
+      });
+    });
+
+    // 监听思考内容
+    executor.on('thinking', (thinking: string) => {
+      accumulatedThinking += thinking;
+      broadcastToRenderer('agent:event:stream-thinking', {
+        taskId: task.id,
+        thinking,
+      });
+    });
+
     executor.on('plan:generated', async (plan: ExecutionPlan) => {
       console.log(`[DynamicSoloExecutor] Plan generated with ${plan.steps.length} steps`);
       broadcastToRenderer('agent:event:plan-generated', {
@@ -898,15 +1205,30 @@ async function executeSoloMode(session: any): Promise<void> {
         plan,
       });
       // 同时更新 todoItems 保持兼容性
-      task.todoItems = plan.steps.map(s => ({
+      const now = Date.now();
+      const newTodoItems = plan.steps.map(s => ({
         id: s.id,
         content: s.name,
         status: s.status,
-        priority: 'medium',
+        priority: 'medium' as const,
+        createdAt: now,
+        updatedAt: now,
       }));
+      task.todoItems = newTodoItems;
       broadcastToRenderer('agent:event:todo-update', {
         taskId: task.id,
         items: task.todoItems,
+      });
+      // 保存执行计划到 AI 消息中（用于在对话中展示）
+      aiMessage.executionPlan = plan;
+      // 将 todoItems 添加到 contentBlocks 中保存到历史记录
+      if (!aiMessage.contentBlocks) {
+        aiMessage.contentBlocks = [];
+      }
+      aiMessage.contentBlocks.push({
+        type: 'todo',
+        todoItems: newTodoItems,
+        timestamp: Date.now(),
       });
       // 保存任务到磁盘
       task.executionPlan = plan;
@@ -971,20 +1293,6 @@ async function executeSoloMode(session: any): Promise<void> {
       });
     });
 
-    executor.on('thinking', (thinking: string) => {
-      broadcastToRenderer('agent:event:stream-thinking', {
-        taskId: task.id,
-        thinking,
-      });
-    });
-
-    executor.on('content', (content: string) => {
-      broadcastToRenderer('agent:event:stream-content', {
-        taskId: task.id,
-        content,
-      });
-    });
-
     executor.on('progress', (progress: number) => {
       broadcastToRenderer('agent:event:progress-update', {
         taskId: task.id,
@@ -993,16 +1301,36 @@ async function executeSoloMode(session: any): Promise<void> {
     });
 
     executor.on('tool:start', (toolCall: any) => {
+      const toolCallData = {
+        id: toolCall.id || `tool_${Date.now()}`,
+        toolName: toolCall.name || '',
+        params: toolCall.params || {},
+        status: 'running' as const,
+      };
+      toolCalls.push(toolCallData);
       broadcastToRenderer('agent:event:tool-call', {
         taskId: task.id,
-        toolCall,
+        toolCall: toolCallData,
       });
     });
 
     executor.on('tool:end', (toolCall: any) => {
+      const existingToolCall = toolCalls.find(tc => tc.id === toolCall.id);
+      if (existingToolCall) {
+        existingToolCall.status = toolCall.result?.success ? 'completed' : 'error';
+        existingToolCall.result = toolCall.result?.data;
+        existingToolCall.error = toolCall.result?.error;
+      }
       broadcastToRenderer('agent:event:tool-result', {
         taskId: task.id,
-        toolCall,
+        toolCall: {
+          id: toolCall.id,
+          toolName: toolCall.name || '',
+          params: {},
+          status: toolCall.result?.success ? 'completed' : 'error',
+          result: toolCall.result?.data,
+          error: toolCall.result?.error,
+        },
       });
     });
 
@@ -1026,14 +1354,11 @@ async function executeSoloMode(session: any): Promise<void> {
     // 执行完成
     console.log(`[executeSoloMode] Execution completed successfully`);
 
-    // 添加 AI 消息
-    const aiMessage: AgentMessage = {
-      id: Date.now().toString(),
-      role: 'assistant',
-      content: 'SOLO 任务执行完成',
-      timestamp: Date.now(),
-    };
-    task.messages.push(aiMessage);
+    // 更新 AI 消息的最终内容
+    aiMessage.content = accumulatedContent || 'SOLO 任务执行完成';
+    aiMessage.thinking = accumulatedThinking || undefined;
+    aiMessage.toolCalls = toolCalls.length > 0 ? toolCalls : undefined;
+    aiMessage.timestamp = Date.now();
 
     session.isRunning = false;
     task.status = 'completed';
@@ -1042,6 +1367,7 @@ async function executeSoloMode(session: any): Promise<void> {
     // 保存任务到磁盘
     await updateTaskOnDisk(task);
 
+    // 通知消息更新
     broadcastToRenderer('agent:event:message', {
       taskId: task.id,
       message: aiMessage,
@@ -1124,8 +1450,6 @@ export async function initializeAgentConfigs(): Promise<void> {
  * 创建默认配置
  */
 export async function createDefaultConfigs(aiConfigs: any[]): Promise<void> {
-  if (aiConfigs.length === 0) return;
-
   const configPath = getConfigPath();
   try {
     let configs: AgentConfig[] = [];
@@ -1136,35 +1460,39 @@ export async function createDefaultConfigs(aiConfigs: any[]): Promise<void> {
       // 文件不存在
     }
 
-    // 如果已经有配置，不创建默认配置
-    if (configs.length > 0) return;
+    // 检查是否有内置智能体，如果没有就重新创建
+    const hasBuiltIn = configs.some(c => c.type === 'chat' || c.type === 'builder' || c.type === 'solocoder');
+    if (configs.length > 0 && hasBuiltIn) return;
 
-    // 为每个 AI 配置创建默认的 Chat、Agent 和 SOLO 配置
+    // 清除所有旧配置，重新创建默认配置
+    console.log('[createDefaultConfigs] 重新创建内置智能体配置...');
     const defaultConfigs: AgentConfig[] = [];
-    const aiConfig = aiConfigs[0];
+    
+    // 使用第一个 AI 配置，如果没有则使用默认空配置
+    const aiConfig = aiConfigs.length > 0 ? aiConfigs[0] : {
+      id: 'default-ai',
+      name: 'Default AI',
+      provider: 'openai',
+      apiKey: '',
+      model: 'gpt-4',
+    };
 
     // Chat 配置
     defaultConfigs.push({
-      ...createDefaultAgentConfig('chat', aiConfig, '对话模式'),
+      ...createAgentConfig('chat', aiConfig, '对话助手', true),
       id: `default-chat-${Date.now()}`,
       isDefault: true,
     });
 
-    // Agent 配置
+    // Solo Coder 配置
     defaultConfigs.push({
-      ...createDefaultAgentConfig('agent', aiConfig, 'Agent 模式'),
-      id: `default-agent-${Date.now()}`,
-      isDefault: false,
-    });
-
-    // SOLO 配置
-    defaultConfigs.push({
-      ...createDefaultAgentConfig('solo', aiConfig, 'SOLO 模式'),
-      id: `default-solo-${Date.now()}`,
+      ...createAgentConfig('solocoder', aiConfig, 'Solo Coder', true),
+      id: `default-solocoder-${Date.now()}`,
       isDefault: false,
     });
 
     await fs.writeFile(configPath, JSON.stringify(defaultConfigs, null, 2), 'utf-8');
+    console.log('[createDefaultConfigs] 已创建2个内置智能体');
   } catch (error) {
     console.error('Failed to create default configs:', error);
   }

@@ -25,7 +25,6 @@ const STEP_TYPE_CONFIG: Record<ExecutionPlanStep['type'], { label: string; color
 
 export const SoloExecutionPanel: React.FC<SoloExecutionPanelProps> = ({ taskId }) => {
   const {
-    executionProgress,
     isProcessing,
     tasks,
   } = useUnifiedAgentStore();
@@ -109,6 +108,7 @@ export const SoloExecutionPanel: React.FC<SoloExecutionPanelProps> = ({ taskId }
   const { steps, goal, reasoning, currentStepIndex } = executionPlan;
   const currentStep = steps[currentStepIndex];
   const completedCount = steps.filter(s => s.status === 'completed').length;
+  const executionProgress = Math.round((completedCount / steps.length) * 100);
 
   const getStepStatus = (step: ExecutionPlanStep, index: number): 'completed' | 'active' | 'pending' | 'failed' => {
     if (step.status === 'completed') return 'completed';

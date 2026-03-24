@@ -20,7 +20,10 @@
     "icon": "logo.png"
   },
   "win": {
-    "target": ["nsis"],
+    "target": [{
+      "target": "nsis",
+      "arch": ["x64"]
+    }],
     "signAndEditExecutable": false,
     "icon": "logo.png",
     "compression": "maximum"

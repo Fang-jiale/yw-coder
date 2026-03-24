@@ -149,9 +149,9 @@ const IPC_CHANNELS = {
 const api = {
   // Window operations
   window: {
-    minimize: () => ipcRenderer.send('window:minimize'),
-    maximize: () => ipcRenderer.send('window:maximize'),
-    close: () => ipcRenderer.send('window:close'),
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    maximize: () => ipcRenderer.invoke('window:maximize'),
+    close: () => ipcRenderer.invoke('window:close'),
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
     reload: () => ipcRenderer.invoke('window:reload'),
     reloadIgnoringCache: () => ipcRenderer.invoke('window:reloadIgnoringCache'),
@@ -451,7 +451,7 @@ const api = {
       ipcRenderer.on(IPC_CHANNELS.SOLO_COMPLETE, (_, data) => callback(data));
     },
     onQuestion: (callback: (data: any) => void) => {
-      ipcRenderer.on(IPC_CHANNELS.SOLO_QUESTION, (_, data) => callback(data));
+      ipcRenderer.on(IPC_CHANNELS.UNIFIED_EVENT_QUESTION, (_, data) => callback(data));
     },
     removeAllListeners: () => {
       ipcRenderer.removeAllListeners(IPC_CHANNELS.SOLO_STEP_START);
@@ -474,6 +474,12 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.CODE_REWRITE, params, configId),
     refactor: (code: string, language: string, configId?: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.CODE_REFACTOR, code, language, configId),
+  },
+
+  // Log operations
+  log: {
+    getPath: () => ipcRenderer.invoke('log:getPath'),
+    readRecent: (lines: number = 100) => ipcRenderer.invoke('log:readRecent', lines),
   },
 
   // Unified Agent
@@ -558,6 +564,13 @@ const api = {
     onProgressUpdate: (callback: (data: any) => void) => {
       ipcRenderer.on(IPC_CHANNELS.UNIFIED_EVENT_PROGRESS_UPDATE, (_, data) => callback(data));
     },
+    // 文件流式写入事件
+    onFileProgress: (callback: (data: { filePath: string; content: string; isComplete: boolean }) => void) => {
+      ipcRenderer.on(IPC_CHANNELS.FILE_PROGRESS, (_, data) => callback(data));
+    },
+    onFileOpen: (callback: (data: { filePath: string }) => void) => {
+      ipcRenderer.on(IPC_CHANNELS.FILE_OPEN, (_, data) => callback(data));
+    },
     removeAllListeners: () => {
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_STEP_START);
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_STEP_COMPLETE);
@@ -577,6 +590,8 @@ const api = {
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_QUESTION);
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_PLAN_GENERATED);
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_PROGRESS_UPDATE);
+      ipcRenderer.removeAllListeners(IPC_CHANNELS.FILE_PROGRESS);
+      ipcRenderer.removeAllListeners(IPC_CHANNELS.FILE_OPEN);
     },
   },
 };

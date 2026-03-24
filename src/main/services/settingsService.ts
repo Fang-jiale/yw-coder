@@ -1,7 +1,8 @@
 import { Settings } from '../../shared/types';
 import * as fs from 'fs/promises';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { app } from 'electron';
 
 const defaultSettings: Settings = {
@@ -23,18 +24,61 @@ export class SettingsService {
   private loaded: boolean = false;
 
   constructor() {
-    let userData: string;
-    try {
-      userData = app.getPath('userData');
-      const testWrite = path.join(userData, '.test-write');
-      require('fs').writeFileSync(testWrite, 'test');
-      require('fs').unlinkSync(testWrite);
-    } catch {
-      userData = path.join(process.cwd(), '.ywcoder-data');
-    }
+    const userData = this.getWritableDataPath();
     this.configPath = path.join(userData, 'config', 'settings.json');
     this.settings = { ...defaultSettings };
     this.loadSettingsSync();
+  }
+
+  // 获取可写的数据目录（支持多个备选路径）
+  private getWritableDataPath(): string {
+    const possiblePaths = [
+      // 首选：Electron 标准用户数据目录
+      (() => {
+        try {
+          return app.getPath('userData');
+        } catch {
+          return null;
+        }
+      })(),
+      // 备选1：应用所在目录
+      path.join(process.cwd(), '.ywcoder-data'),
+      // 备选2：用户主目录
+      path.join(os.homedir(), '.ywcoder-data'),
+      // 备选3：临时目录
+      path.join(os.tmpdir(), 'ywcoder-data'),
+    ].filter(Boolean) as string[];
+
+    for (const testPath of possiblePaths) {
+      try {
+        const testFile = path.join(testPath, '.test-write');
+        // 确保目录存在
+        if (!existsSync(testPath)) {
+          mkdirSync(testPath, { recursive: true });
+        }
+        // 测试写入权限
+        writeFileSync(testFile, 'test');
+        // 清理测试文件
+        try {
+          require('fs').unlinkSync(testFile);
+        } catch {
+          // 忽略清理错误
+        }
+        console.log('[SettingsService] Using data path:', testPath);
+        return testPath;
+      } catch (e) {
+        console.warn('[SettingsService] Path not writable:', testPath, e);
+        continue;
+      }
+    }
+
+    // 如果所有路径都失败，使用内存模式（不保存到磁盘）
+    console.error('[SettingsService] No writable path found, using memory mode');
+    return '';
+  }
+
+  getDataPath(): string {
+    return path.dirname(path.dirname(this.configPath));
   }
 
   private loadSettingsSync(): void {

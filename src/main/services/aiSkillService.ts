@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { AIProviderConfig } from '../../shared/types';
-import { PREDEFINED_PROVIDERS } from './aiService';
+import { PREDEFINED_PROVIDERS } from './aiProvider';
 import {
   AICommand,
   CodeEditOperation,
