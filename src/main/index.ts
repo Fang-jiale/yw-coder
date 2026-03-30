@@ -14,10 +14,9 @@ import {
   createDefaultConfigs,
 } from './agent/unifiedAgentIPC';
 import { IPC_CHANNELS, AIProviderConfig } from '../shared/types';
+import { logger } from './utils/logger';
 
 app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-software-rasterizer');
 
 const isDev = process.argv.includes('--dev');
 
@@ -41,6 +40,18 @@ class YWCodeRApp {
 
   private initializeApp(): void {
     app.whenReady().then(() => {
+      // 初始化日志系统
+      logger.init();
+
+      // 记录应用启动
+      logger.info('app_start', {
+        version: app.getVersion(),
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        electronVersion: process.versions.electron
+      });
+
       try {
         this.terminalService = new TerminalService();
       } catch (e) {
@@ -94,6 +105,63 @@ class YWCodeRApp {
       this.mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
     }
 
+    // WebContents 事件日志 - 用于排查渲染问题
+    this.mainWindow.webContents.on('did-finish-load', () => {
+      logger.info('webcontents_did_finish_load', {
+        url: this.mainWindow?.webContents.getURL(),
+      });
+    });
+
+    this.mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+      logger.error('webcontents_did_fail_load', {
+        errorCode,
+        errorDescription,
+        url: validatedURL,
+      });
+    });
+
+    this.mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      logger.error('webcontents_render_process_gone', {
+        reason: details.reason,
+        exitCode: details.exitCode,
+      });
+    });
+
+    this.mainWindow.webContents.on('unresponsive', () => {
+      logger.warn('webcontents_unresponsive', {});
+    });
+
+    this.mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      // 记录 error 级别的 console 消息 (level 3 = error)
+      if (level === 3) {
+        // 尝试解析消息内容，如果是特定格式则展开
+        let parsedMessage = message;
+        let messageType = 'string';
+
+        // 检测是否是常见的错误模式
+        if (message.includes('#<Event>') || message.includes('[object Event]')) {
+          messageType = 'event_object';
+        } else if (message.includes('Uncaught (in promise)')) {
+          messageType = 'unhandled_promise_rejection';
+        } else if (message.includes('Failed to load resource')) {
+          messageType = 'resource_load_failed';
+        } else if (message.includes('worker')) {
+          messageType = 'worker_related';
+        }
+
+        logger.error('webcontents_console_message', {
+          message: message.substring(0, 500),
+          messageType,
+          line,
+          source: sourceId,
+          level,
+          levelName: 'error',
+          // 如果是来自 renderer 的日志，尝试提取更多信息
+          url: this.mainWindow?.webContents.getURL(),
+        });
+      }
+    });
+
     this.mainWindow.on('maximize', () => {
       this.mainWindow?.webContents.send('window:maximizeChange', true);
     });
@@ -104,6 +172,11 @@ class YWCodeRApp {
   }
 
   private setupIPC(): void {
+    // Renderer process render logging
+    ipcMain.on('renderer:log-render-event', (_, { event, data, ts }) => {
+      logger.info(event, { ...data, ts, source: 'renderer' });
+    });
+
     // File operations
     ipcMain.handle(IPC_CHANNELS.FILE_READ, async (_, filePath: string) => {
       return this.fileService.readFile(filePath);
@@ -126,6 +199,10 @@ class YWCodeRApp {
     });
 
     ipcMain.handle(IPC_CHANNELS.FILE_GET_TREE, async (_, dirPath: string) => {
+      // 记录工作区打开
+      logger.info('workspace_opened', {
+        workspacePath: dirPath
+      });
       return this.fileService.getFileTree(dirPath);
     });
 

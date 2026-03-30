@@ -188,6 +188,67 @@ export interface AgentQuestion {
   }>;
 }
 
+// ==================== Stream Event Types ====================
+// 流式事件驱动渲染架构 - 统一事件类型定义
+
+/** 流式事件项基础接口 */
+export interface StreamEventItemBase {
+  id: string;
+  seq: number;
+  timestamp: number;
+}
+
+/** 内容事件 */
+export interface ContentStreamEvent extends StreamEventItemBase {
+  type: 'content';
+  text: string;
+}
+
+/** 思考事件 */
+export interface ThinkingStreamEvent extends StreamEventItemBase {
+  type: 'thinking';
+  text: string;
+  done?: boolean;
+}
+
+/** 工具调用事件 */
+export interface ToolStreamEvent extends StreamEventItemBase {
+  type: 'tool';
+  toolCallId: string;
+  toolName: string;
+  params: any;
+  status: 'running' | 'completed' | 'error';
+  result?: any;
+  error?: string;
+}
+
+/** Todo 更新事件 */
+export interface TodoStreamEvent extends StreamEventItemBase {
+  type: 'todo';
+  items: TodoItem[];
+}
+
+/** 智能体提问事件 */
+export interface QuestionStreamEvent extends StreamEventItemBase {
+  type: 'question';
+  questionId: string;
+  question: string;
+  options?: Array<{
+    id: string;
+    label: string;
+    value: string;
+  }>;
+  context?: string;
+}
+
+/** 统一的流式事件项类型 */
+export type StreamEventItem =
+  | ContentStreamEvent
+  | ThinkingStreamEvent
+  | ToolStreamEvent
+  | TodoStreamEvent
+  | QuestionStreamEvent;
+
 export interface SearchResult {
   path: string;
   matches: Array<{
@@ -331,6 +392,9 @@ export const IPC_CHANNELS = {
   // Dynamic Execution Plan Events
   UNIFIED_EVENT_PLAN_GENERATED: 'agent:event:plan-generated',
   UNIFIED_EVENT_PROGRESS_UPDATE: 'agent:event:progress-update',
+
+  // Stream Event for event-driven rendering
+  AGENT_EVENT_STREAM_ITEM: 'agent:event:stream-item',
 } as const;
 
 // 消息解析辅助函数

@@ -144,6 +144,9 @@ const IPC_CHANNELS = {
   // 动态执行计划事件
   UNIFIED_EVENT_PLAN_GENERATED: 'agent:event:plan-generated',
   UNIFIED_EVENT_PROGRESS_UPDATE: 'agent:event:progress-update',
+  
+  // Stream Event for event-driven rendering
+  AGENT_EVENT_STREAM_ITEM: 'agent:event:stream-item',
 } as const;
 
 const api = {
@@ -476,6 +479,11 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.CODE_REFACTOR, code, language, configId),
   },
 
+  // Render logging for debugging
+  logRenderEvent: (event: string, data?: any) => {
+    ipcRenderer.send('renderer:log-render-event', { event, data, ts: new Date().toISOString() });
+  },
+
   // Unified Agent
   unifiedAgent: {
     // Config management
@@ -551,6 +559,10 @@ const api = {
     onQuestion: (callback: (data: any) => void) => {
       ipcRenderer.on(IPC_CHANNELS.UNIFIED_EVENT_QUESTION, (_, data) => callback(data));
     },
+    // 流式事件项（用于事件流驱动渲染）
+    onStreamItem: (callback: (data: { taskId: string; item: any }) => void) => {
+      ipcRenderer.on(IPC_CHANNELS.AGENT_EVENT_STREAM_ITEM, (_, data) => callback(data));
+    },
     // 动态执行计划事件
     onPlanGenerated: (callback: (data: any) => void) => {
       ipcRenderer.on(IPC_CHANNELS.UNIFIED_EVENT_PLAN_GENERATED, (_, data) => callback(data));
@@ -577,6 +589,7 @@ const api = {
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_QUESTION);
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_PLAN_GENERATED);
       ipcRenderer.removeAllListeners(IPC_CHANNELS.UNIFIED_EVENT_PROGRESS_UPDATE);
+      ipcRenderer.removeAllListeners(IPC_CHANNELS.AGENT_EVENT_STREAM_ITEM);
     },
   },
 };

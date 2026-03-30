@@ -130,9 +130,6 @@ interface UnifiedAgentActions {
 
   // 问题类型定义
   addMessage: (taskId: string, message: AgentMessage) => void;
-  updateMessage: (taskId: string, messageId: string, patch: Partial<AgentMessage>) => void;
-  deleteMessage: (taskId: string, messageId: string) => void;
-  clearTaskMessages: (taskId: string) => void;
   addQuestionToMessage: (taskId: string, messageIndex: number, question: AgentQuestion) => void;
   answerQuestion: (taskId: string, messageIndex: number, questionId: string, answer: string) => void;
   sendMessage: (taskId: string, content: string, aiConfig?: any) => Promise<void>;
@@ -453,7 +450,6 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
             streamingMessage: '',
             streamingThinking: '',
             streamingToolCalls: [],
-            streamingItems: [],
             isProcessing: task?.status === 'running',
           });
         },
@@ -475,45 +471,6 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
             const task = state.tasks.find((t) => t.id === taskId);
             if (task) {
               task.messages.push(message);
-              task.updatedAt = Date.now();
-            }
-          });
-        },
-
-        // 更新消息内容（收口消息修改，避免组件直接突变）
-        updateMessage: (taskId, messageId, patch) => {
-          set((state) => {
-            const task = state.tasks.find((t) => t.id === taskId);
-            if (task) {
-              const messageIndex = task.messages.findIndex((m) => m.id === messageId);
-              if (messageIndex !== -1) {
-                task.messages[messageIndex] = {
-                  ...task.messages[messageIndex],
-                  ...patch,
-                };
-                task.updatedAt = Date.now();
-              }
-            }
-          });
-        },
-
-        // 删除单条消息（收口消息修改，避免组件直接突变）
-        deleteMessage: (taskId, messageId) => {
-          set((state) => {
-            const task = state.tasks.find((t) => t.id === taskId);
-            if (task) {
-              task.messages = task.messages.filter((m) => m.id !== messageId);
-              task.updatedAt = Date.now();
-            }
-          });
-        },
-
-        // 清空任务的所有消息（收口消息修改，避免组件直接突变）
-        clearTaskMessages: (taskId) => {
-          set((state) => {
-            const task = state.tasks.find((t) => t.id === taskId);
-            if (task) {
-              task.messages = [];
               task.updatedAt = Date.now();
             }
           });
@@ -739,78 +696,15 @@ export const useUnifiedAgentStore = create<UnifiedAgentState & UnifiedAgentActio
             streamingToolCalls: [],
             streamingItems: [],
             isProcessing: false,
-            resultCards: [],
-            taskProgress: null,
           });
         },
 
         // 流式事件项管理（用于事件流驱动渲染）
         addStreamItem: (item) => {
           set((state) => {
-            // 检查是否可以与最后一个同类型事件合并
-            const lastItem = state.streamingItems[state.streamingItems.length - 1];
-            if (lastItem) {
-              // 合并连续的 content 事件
-              if (item.type === 'content' && lastItem.type === 'content') {
-                const contentItem = lastItem as Extract<StreamEventItem, { type: 'content' }>;
-                const newText = (item as Extract<StreamEventItem, { type: 'content' }>).text;
-                // 保险丝：单个 content 项上限 10KB，超出则截断
-                const MAX_CONTENT_SIZE = 10 * 1024;
-                if (contentItem.text.length + newText.length > MAX_CONTENT_SIZE) {
-                  const remaining = MAX_CONTENT_SIZE - contentItem.text.length;
-                  if (remaining > 0) {
-                    contentItem.text += newText.slice(0, remaining);
-                  }
-                  // 标记为已截断
-                  (contentItem as any).truncated = true;
-                } else {
-                  contentItem.text += newText;
-                }
-                return;
-              }
-              // 合并连续的 thinking 事件
-              if (item.type === 'thinking' && lastItem.type === 'thinking') {
-                const thinkingItem = lastItem as Extract<StreamEventItem, { type: 'thinking' }>;
-                const newText = (item as Extract<StreamEventItem, { type: 'thinking' }>).text;
-                // 保险丝：单个 thinking 项上限 10KB
-                const MAX_THINKING_SIZE = 10 * 1024;
-                if (thinkingItem.text.length + newText.length > MAX_THINKING_SIZE) {
-                  const remaining = MAX_THINKING_SIZE - thinkingItem.text.length;
-                  if (remaining > 0) {
-                    thinkingItem.text += newText.slice(0, remaining);
-                  }
-                  (thinkingItem as any).truncated = true;
-                } else {
-                  thinkingItem.text += newText;
-                }
-                return;
-              }
-            }
-
-            // 保险丝：streamingItems 数组上限 100 项
-            const MAX_STREAMING_ITEMS = 100;
-            if (state.streamingItems.length >= MAX_STREAMING_ITEMS) {
-              // 策略：保留 content/thinking，合并或丢弃旧的 tool/todo/question
-              const contentThinkingItems = state.streamingItems.filter(
-                (i) => i.type === 'content' || i.type === 'thinking'
-              );
-              const otherItems = state.streamingItems.filter(
-                (i) => i.type !== 'content' && i.type !== 'thinking'
-              );
-
-              // 如果 otherItems 太多，只保留最近的 20 个
-              if (otherItems.length > 20) {
-                const recentOtherItems = otherItems.slice(-20);
-                state.streamingItems = [...contentThinkingItems, ...recentOtherItems];
-              } else {
-                // 否则只保留最近的 50 个 content/thinking
-                const recentContentThinking = contentThinkingItems.slice(-50);
-                state.streamingItems = [...recentContentThinking, ...otherItems];
-              }
-            }
-
-            // 不能合并，添加新事件
             state.streamingItems.push(item);
+            // 按 seq 排序
+            state.streamingItems.sort((a, b) => a.seq - b.seq);
           });
         },
 
@@ -944,11 +838,6 @@ export function setupUnifiedAgentEventListeners(): void {
   // 新消息
   window.electronAPI?.unifiedAgent?.onMessage?.((data: any) => {
     DEBUG && console.log('[UnifiedAgentStore] onMessage received:', data.message.id, 'toolCalls:', data.message.toolCalls?.length);
-
-    // 注意：不再把 streamingItems 保存到历史消息中
-    // streamingItems 只作为当前流式阶段的临时状态，不持久化
-    // 历史消息展示使用 message.content / message.thinking / toolCalls / todoItems 等已有字段
-
     addMessage(data.taskId, data.message);
     // 不再追加到 streamingMessage，因为消息已保存在 task.messages 中
     // streamingMessage 只用于流式过程中的临时显示
@@ -979,8 +868,13 @@ export function setupUnifiedAgentEventListeners(): void {
     updateThinking(data.taskId, data.thinking);
   });
 
-  // 移除 onStreamThinking 监听，只使用 stream-item 事件
-  // 这是关键优化：减少重复状态更新
+  // 流式思考内容（追加）- 只处理当前活跃任务
+  window.electronAPI?.unifiedAgent?.onStreamThinking?.((data: any) => {
+    const { activeTaskId } = useUnifiedAgentStore.getState();
+    if (data.taskId === activeTaskId) {
+      appendStreamingThinking(data.thinking);
+    }
+  });
 
   // 思考完成 - 更新消息中的思考内容
   window.electronAPI?.unifiedAgent?.onThinkingComplete?.((data: any) => {
@@ -998,96 +892,38 @@ export function setupUnifiedAgentEventListeners(): void {
     }
   });
 
-  // 移除 onStreamContent 监听，只使用 stream-item 事件
-  // 这是关键优化：减少重复状态更新
-
-  // 节流机制：批量处理流式事件，减少 React 重渲染频率
-  let pendingStreamItems: StreamEventItem[] = [];
-  let streamUpdateTimer: number | null = null;
-  const STREAM_UPDATE_INTERVAL = 50; // 每 50ms 批量更新一次
-
-  const flushPendingStreamItems = () => {
-    if (pendingStreamItems.length === 0) return;
-    
-    // 复制并清空待处理队列
-    const itemsToProcess = [...pendingStreamItems];
-    pendingStreamItems = [];
-    streamUpdateTimer = null;
-    
-    // 关键优化：只调用一次 setState，在内部处理所有 items
-    useUnifiedAgentStore.setState((state) => {
-      itemsToProcess.forEach((item) => {
-        // 对于 tool 类型，检查是否已存在
-        if (item.type === 'tool') {
-          const toolEvent = item as Extract<StreamEventItem, { type: 'tool' }>;
-          const existingIndex = state.streamingItems.findIndex(
-            (existingItem: StreamEventItem) => existingItem.type === 'tool' && (existingItem as Extract<StreamEventItem, { type: 'tool' }>).toolCallId === toolEvent.toolCallId
-          );
-          if (existingIndex !== -1) {
-            // 直接更新现有项
-            Object.assign(state.streamingItems[existingIndex], { status: toolEvent.status, result: toolEvent.result, error: toolEvent.error });
-            return;
-          }
-        }
-        
-        // 使用与 addStreamItem 相同的合并逻辑
-        const lastItem = state.streamingItems[state.streamingItems.length - 1];
-        if (lastItem) {
-          // 合并连续的 content 事件
-          if (item.type === 'content' && lastItem.type === 'content') {
-            const contentItem = lastItem as Extract<StreamEventItem, { type: 'content' }>;
-            const newText = (item as Extract<StreamEventItem, { type: 'content' }>).text;
-            const MAX_CONTENT_SIZE = 10 * 1024;
-            if (contentItem.text.length + newText.length > MAX_CONTENT_SIZE) {
-              const remaining = MAX_CONTENT_SIZE - contentItem.text.length;
-              if (remaining > 0) {
-                contentItem.text += newText.slice(0, remaining);
-              }
-              (contentItem as any).truncated = true;
-            } else {
-              contentItem.text += newText;
-            }
-            return;
-          }
-          // 合并连续的 thinking 事件
-          if (item.type === 'thinking' && lastItem.type === 'thinking') {
-            const thinkingItem = lastItem as Extract<StreamEventItem, { type: 'thinking' }>;
-            const newText = (item as Extract<StreamEventItem, { type: 'thinking' }>).text;
-            const MAX_THINKING_SIZE = 10 * 1024;
-            if (thinkingItem.text.length + newText.length > MAX_THINKING_SIZE) {
-              const remaining = MAX_THINKING_SIZE - thinkingItem.text.length;
-              if (remaining > 0) {
-                thinkingItem.text += newText.slice(0, remaining);
-              }
-              (thinkingItem as any).truncated = true;
-            } else {
-              thinkingItem.text += newText;
-            }
-            return;
-          }
-        }
-        
-        // 不能合并，添加新事件
-        state.streamingItems.push(item);
-      });
-    });
-  };
-
-  const scheduleStreamUpdate = () => {
-    if (streamUpdateTimer === null) {
-      streamUpdateTimer = window.setTimeout(flushPendingStreamItems, STREAM_UPDATE_INTERVAL);
+  // 流式内容（追加）- 实时更新到 streamingMessage，只处理当前活跃任务
+  window.electronAPI?.unifiedAgent?.onStreamContent?.((data: any) => {
+    const { activeTaskId } = useUnifiedAgentStore.getState();
+    if (data.taskId === activeTaskId && data.content) {
+      DEBUG && console.log('[UnifiedAgentStore] onStreamContent received:', data.content?.slice(0, 50), '...');
+      appendStreamingMessage(data.content);
     }
-  };
+  });
 
   // 流式事件项（用于事件流驱动渲染）- 只处理当前活跃任务
   window.electronAPI?.unifiedAgent?.onStreamItem?.((data: { taskId: string; item: StreamEventItem }) => {
-    const { activeTaskId } = useUnifiedAgentStore.getState();
+    const { activeTaskId, addStreamItem, updateStreamItem, streamingItems } = useUnifiedAgentStore.getState();
     if (data.taskId === activeTaskId && data.item) {
       DEBUG && console.log('[UnifiedAgentStore] onStreamItem received:', data.item.type, 'seq:', data.item.seq);
-      
-      // 添加到待处理队列，节流更新
-      pendingStreamItems.push(data.item);
-      scheduleStreamUpdate();
+
+      // 对于 tool 类型，检查是否已存在（tool_start 后 tool_end 需要更新同一个 item）
+      if (data.item.type === 'tool') {
+        const toolEvent = data.item as Extract<StreamEventItem, { type: 'tool' }>;
+        const existingIndex = streamingItems.findIndex(
+          (item) => item.type === 'tool' && (item as Extract<StreamEventItem, { type: 'tool' }>).toolCallId === toolEvent.toolCallId
+        );
+        if (existingIndex !== -1) {
+          // 更新已存在的 tool 事件
+          updateStreamItem(streamingItems[existingIndex].id, { status: toolEvent.status, result: toolEvent.result, error: toolEvent.error });
+        } else {
+          // 添加新的 tool 事件
+          addStreamItem(data.item);
+        }
+      } else {
+        // 其他类型直接添加
+        addStreamItem(data.item);
+      }
     }
   });
 
@@ -1152,11 +988,6 @@ export function setupUnifiedAgentEventListeners(): void {
     console.log('[UnifiedAgentStore] onStatusChange:', data.taskId, data.status);
     updateTaskStatus(data.taskId, data.status);
     if (data.status === 'completed' || data.status === 'failed') {
-      // 立即刷新待处理的流式事件
-      if (streamUpdateTimer !== null) {
-        clearTimeout(streamUpdateTimer);
-        flushPendingStreamItems();
-      }
       console.log('[UnifiedAgentStore] Setting isProcessing to false');
       setIsProcessing(false);
     }

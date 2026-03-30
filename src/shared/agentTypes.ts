@@ -3,7 +3,7 @@
  * 整合普通对话、SOLO模式和Agent模式
  */
 
-import { AIProviderConfig } from './types';
+import { AIProviderConfig, StreamEventItem } from './types';
 
 /**
  * Agent 运行模式
@@ -153,7 +153,7 @@ export interface AgentMessage {
   timestamp: number;
   thinking?: string;
   toolCalls?: AgentToolCall[];
-  streamingItems?: Array<{type: 'text' | 'tool', content?: string, toolCall?: AgentToolCall}>;
+  streamingItems?: StreamEventItem[];
   agentQuestions?: AgentQuestion[];
 }
 

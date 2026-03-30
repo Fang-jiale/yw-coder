@@ -41,6 +41,16 @@ function App() {
   const { currentAction, showDiffViewer, hideDiff, applyAction } = useCodeActionStore();
   const { createTask, activeConfigId } = useUnifiedAgentStore();
 
+  // 编辑器区域渲染检查日志
+  useEffect(() => {
+    window.electronAPI?.logRenderEvent?.('editor_area_render_check', {
+      showEditor,
+      openFilesCount: openFiles.length,
+      activeFilePath,
+      hasActiveFile: !!activeFilePath,
+    });
+  }, [showEditor, openFiles.length, activeFilePath]);
+
   useEffect(() => {
     const checkPlatform = () => {
       const platform = navigator.userAgent;

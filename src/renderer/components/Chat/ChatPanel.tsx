@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUnifiedAgentStore, setupUnifiedAgentEventListeners } from '@/store/unifiedAgentStore';
-import { ResultCard, FileResultCard, CommandResultCard, EnvCheckResultCard } from './ResultCards/ResultCard';
+import { useShallow } from 'zustand/react/shallow';
+import { ResultCard as ResultCardComponent, FileResultCard, CommandResultCard, EnvCheckResultCard } from './ResultCards/ResultCard';
+import { StreamingMessage } from './StreamingMessage';
 import { useWorkspaceStore } from '@/store/workspaceStore';
 import { useCodeEditorStore } from '@/store/codeEditorStore';
 import { useSettingsStore } from '@/store/settingsStore';
@@ -52,6 +54,7 @@ import { DiffViewer } from '../DiffViewer/DiffViewer';
 import { SoloExecutionPanel } from '../SOLO/SoloExecutionPanel';
 import { CodeEditOperation } from '../../../shared/aiCommands';
 import { AgentRuntimeMode, AgentStep, TodoItem, AgentMessage } from '../../../shared/agentTypes';
+import { StreamEventItem, ResultCard, TaskStatus } from '../../../shared/types';
 
 interface SlashCommand {
   id: string;
@@ -77,7 +80,7 @@ interface Message {
   thinking?: string;
   toolCalls?: ToolCallInfo[];
   timestamp: number;
-  streamingItems?: StreamingItem[];
+  streamingItems?: StreamEventItem[];
   agentQuestions?: AgentQuestion[];
   steps?: AgentStep[];
   todoItems?: TodoItem[];
@@ -666,13 +669,6 @@ interface AgentQuestion {
   options?: Array<{id: string; label: string; value: string}>;
 }
 
-// 流式项目类型
-interface StreamingItem {
-  type: 'text' | 'tool';
-  content?: string;
-  toolCall?: ToolCallInfo;
-}
-
 // 统一的消息内容组件
 interface MessageContentProps {
   content: string;
@@ -680,7 +676,7 @@ interface MessageContentProps {
   toolCalls?: ToolCallInfo[];
   fileEdits?: FileEditInfo[];
   agentQuestions?: AgentQuestion[];
-  streamingItems?: StreamingItem[];
+  streamingItems?: StreamEventItem[];
   todoItems?: TodoItem[];
   isStreaming?: boolean;
   onCopy: (code: string) => void;
@@ -691,6 +687,19 @@ interface MessageContentProps {
   onToggleToolCall: (toolCallId: string) => void;
   onAnswerQuestion?: (questionId: string, answer: string) => void;
   messageId: string;
+  // 从 ChatPanel 传入的 store 数据和方法
+  resultCards?: ResultCard[];
+  taskProgress?: {
+    status: TaskStatus;
+    currentPhase: string;
+    currentStep: number;
+    totalSteps: number;
+    message: string;
+  } | null;
+  collapsedThinking?: boolean;
+  collapsedToolCalls?: boolean;
+  toggleCollapsedThinking?: () => void;
+  toggleCollapsedToolCalls?: () => void;
 }
 
 // 流式内容渲染组件 - 支持实时Markdown渲染
@@ -708,16 +717,14 @@ const StreamingContent: React.FC<{ content: string; onCopy: (code: string) => vo
 
 const MessageContent: React.FC<MessageContentProps> = ({
   content, thinking, toolCalls, fileEdits, agentQuestions, streamingItems, todoItems, isStreaming, onCopy, copiedCode,
-  expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall, onAnswerQuestion, messageId
+  expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall, onAnswerQuestion, messageId,
+  resultCards,
+  taskProgress,
+  collapsedThinking,
+  collapsedToolCalls,
+  toggleCollapsedThinking,
+  toggleCollapsedToolCalls,
 }) => {
-  const {
-    resultCards,
-    taskProgress,
-    collapsedThinking,
-    collapsedToolCalls,
-    toggleCollapsedThinking,
-    toggleCollapsedToolCalls,
-  } = useUnifiedAgentStore();
 
   // 解析 content 中的各种标签
   const parsedContent = useMemo(() => {
@@ -829,15 +836,138 @@ const MessageContent: React.FC<MessageContentProps> = ({
     return { completed, total, percentage: Math.round((completed / total) * 100) };
   }, [effectiveTodoItems]);
 
-  // 如果有 streamingItems，按时间顺序渲染
+  // 如果有 streamingItems，按 seq 时间顺序渲染
   if (streamingItems && streamingItems.length > 0) {
+    // 按 seq 排序
+    const sortedItems = [...streamingItems].sort((a, b) => a.seq - b.seq);
+
+    // 渲染单个 stream item
+    const renderStreamItem = (item: StreamEventItem, index: number) => {
+      switch (item.type) {
+        case 'thinking':
+          return (
+            <div key={`${item.id}-${index}`} className="mb-3">
+              <button
+                onClick={toggleCollapsedThinking}
+                className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
+              >
+                <Brain className="w-3.5 h-3.5" />
+                <span>思考过程</span>
+                <ChevronDown
+                  className={cn(
+                    'w-3 h-3 transition-transform duration-200 ml-auto',
+                    collapsedThinking && 'rotate-180'
+                  )}
+                />
+              </button>
+              {!collapsedThinking && (
+                <ThinkingBlock
+                  thinking={item.text}
+                  isStreaming={isStreaming && index === sortedItems.length - 1}
+                  isExpanded={expandedThinkingMsgs.has(messageId)}
+                  onToggle={() => onToggleThinking(messageId)}
+                />
+              )}
+            </div>
+          );
+
+        case 'tool':
+          const tc: ToolCallInfo = {
+            id: item.toolCallId,
+            toolName: item.toolName,
+            params: item.params,
+            status: item.status,
+            result: item.result,
+            error: item.error,
+          };
+          return (
+            <div key={`${item.id}-${index}`} className="mb-2">
+              <ToolCallCard
+                toolCall={tc}
+                isExpanded={expandedToolCalls.has(item.toolCallId)}
+                onToggle={() => onToggleToolCall(item.toolCallId)}
+              />
+            </div>
+          );
+
+        case 'todo':
+          return (
+            <div key={`${item.id}-${index}`} className="my-3 p-3 bg-muted/50 rounded-lg border">
+              <div className="flex items-center gap-2 text-xs font-medium mb-2">
+                <ListTodo className="w-4 h-4 text-primary" />
+                <span>任务进度</span>
+                <span className="text-muted-foreground/60">({item.items.length})</span>
+              </div>
+              <div className="space-y-1.5">
+                {item.items.map((todo) => (
+                  <div
+                    key={todo.id}
+                    className={cn(
+                      "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
+                      todo.status === 'pending' && "bg-muted/50 text-muted-foreground border",
+                      todo.status === 'in_progress' && "bg-blue-500/10 text-blue-600 border border-blue-500/20",
+                      todo.status === 'completed' && "bg-green-500/10 text-green-600 line-through",
+                      todo.status === 'failed' && "bg-red-500/10 text-red-600 border border-red-500/20"
+                    )}
+                  >
+                    {todo.status === 'pending' && <Circle className="w-3 h-3" />}
+                    {todo.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin" />}
+                    {todo.status === 'completed' && <CheckCircle2 className="w-3 h-3" />}
+                    {todo.status === 'failed' && <XCircle className="w-3 h-3" />}
+                    <span className="flex-1">{todo.content}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+
+        case 'question':
+          return (
+            <div key={`${item.id}-${index}`} className="my-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+              <div className="flex items-center gap-2 mb-2 text-xs font-medium text-amber-600">
+                <HelpCircle className="w-3.5 h-3.5" />
+                <span>需要您的回答</span>
+              </div>
+              <p className="text-sm text-foreground mb-3">{item.question}</p>
+              {item.options && item.options.length > 0 && onAnswerQuestion && (
+                <div className="flex flex-wrap gap-2">
+                  {item.options.map((option) => (
+                    <button
+                      key={option.id}
+                      onClick={() => onAnswerQuestion(item.questionId, option.value)}
+                      className="px-3 py-2 text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-lg transition-colors"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+
+        case 'content':
+          return (
+            <div key={`${item.id}-${index}`} className="prose prose-sm dark:prose-invert max-w-none">
+              {isStreaming && index === sortedItems.length - 1 ? (
+                <StreamingContent content={item.text} onCopy={onCopy} copiedCode={copiedCode} />
+              ) : (
+                <MarkdownContent content={item.text} onCopy={onCopy} copiedCode={copiedCode} />
+              )}
+            </div>
+          );
+
+        default:
+          return null;
+      }
+    };
+
     return (
       <>
         {/* Result Cards - 结果卡片区域 */}
         {resultCards && resultCards.length > 0 && (
           <div className="mb-4 space-y-2">
             {resultCards.map((card, index) => (
-              <ResultCard
+              <ResultCardComponent
                 key={`result-${index}`}
                 title={card.title}
                 status={card.status}
@@ -876,160 +1006,12 @@ const MessageContent: React.FC<MessageContentProps> = ({
           </div>
         )}
 
-        {/* Tool Calls - 工具调用（默认折叠） */}
-        <div className="mb-3">
-          <button
-            onClick={toggleCollapsedToolCalls}
-            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
-          >
-            <Terminal className="w-3.5 h-3.5" />
-            <span>工具调用</span>
-            <span className="text-muted-foreground/60">({streamingItems.filter(i => i.type === 'tool').length})</span>
-            <ChevronDown
-              className={cn(
-                'w-3 h-3 transition-transform duration-200 ml-auto',
-                collapsedToolCalls && 'rotate-180'
-              )}
-            />
-          </button>
-          {!collapsedToolCalls && (
-            <div className="space-y-2">
-              {streamingItems.map((item, index) => {
-                if (item.type === 'tool') {
-                  const tc = item.toolCall as ToolCallInfo | undefined;
-                  if (tc && tc.id) {
-                    return (
-                      <div key={`${tc.id}-${index}`}>
-                        <ToolCallCard
-                          toolCall={tc}
-                          isExpanded={expandedToolCalls.has(tc.id)}
-                          onToggle={() => onToggleToolCall(tc.id)}
-                        />
-                      </div>
-                    );
-                  }
-                }
-                return null;
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Thinking Process - 思考内容（默认折叠） */}
-        {effectiveThinking && (
-          <div className="mb-3">
-            <button
-              onClick={toggleCollapsedThinking}
-              className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2 px-2 py-1 rounded-md hover:bg-muted"
-            >
-              <Brain className="w-3.5 h-3.5" />
-              <span>思考过程</span>
-              <ChevronDown
-                className={cn(
-                  'w-3 h-3 transition-transform duration-200 ml-auto',
-                  collapsedThinking && 'rotate-180'
-                )}
-              />
-            </button>
-            {!collapsedThinking && (
-              <ThinkingBlock
-                thinking={effectiveThinking}
-                isStreaming={isStreaming}
-                isExpanded={expandedThinkingMsgs.has(messageId)}
-                onToggle={() => onToggleThinking(messageId)}
-              />
-            )}
-          </div>
-        )}
-
         {/* File Edits - 文件编辑操作 */}
         {fileEdits && fileEdits.length > 0 && <FileEdits edits={fileEdits} />}
 
-        {/* Agent Questions */}
-        {agentQuestions && agentQuestions.length > 0 && onAnswerQuestion && (
-          <div className="mb-3">
-            <AgentQuestions questions={agentQuestions} onAnswer={onAnswerQuestion} />
-          </div>
-        )}
-
-        {/* Todo Items - 任务进度展示（备用，当 taskProgress 不可用时） */}
-        {effectiveTodoItems && effectiveTodoItems.length > 0 && !taskProgress && (
-          <div className="my-3 p-3 bg-muted/50 rounded-lg border">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2 text-xs font-medium">
-                <ListTodo className="w-4 h-4 text-primary" />
-                <span>任务进度</span>
-              </div>
-              {todoProgress && (
-                <span className="text-xs text-muted-foreground">
-                  {todoProgress.completed}/{todoProgress.total} ({todoProgress.percentage}%)
-                </span>
-              )}
-            </div>
-            {todoProgress && (
-              <div className="w-full h-1.5 bg-muted rounded-full mb-3 overflow-hidden">
-                <div
-                  className="h-full bg-primary rounded-full transition-all duration-300"
-                  style={{ width: `${todoProgress.percentage}%` }}
-                />
-              </div>
-            )}
-            <div className="space-y-1.5">
-              {effectiveTodoItems.map((item) => (
-                <div
-                  key={item.id}
-                  className={cn(
-                    "flex items-center gap-2 px-2 py-1.5 rounded-md text-xs",
-                    item.status === 'pending' && "bg-muted/50 text-muted-foreground border",
-                    item.status === 'in_progress' && "bg-blue-500/10 text-blue-600 border border-blue-500/20",
-                    item.status === 'completed' && "bg-green-500/10 text-green-600 line-through",
-                    item.status === 'failed' && "bg-red-500/10 text-red-600 border border-red-500/20"
-                  )}
-                >
-                  {item.status === 'pending' && <Circle className="w-3 h-3" />}
-                  {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin" />}
-                  {item.status === 'completed' && <CheckCircle2 className="w-3 h-3" />}
-                  {item.status === 'failed' && <XCircle className="w-3 h-3" />}
-                  <span className="flex-1">{item.content}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Question - 问题展示 */}
-        {parsedContent.question && (
-          <div className="my-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-            <div className="flex items-center gap-2 mb-2 text-xs font-medium text-amber-600">
-              <HelpCircle className="w-3.5 h-3.5" />
-              <span>需要您的回答</span>
-            </div>
-            <p className="text-sm text-foreground mb-3">{parsedContent.question.question}</p>
-          </div>
-        )}
-
-        {/* Options - 选项按钮展示 */}
-        {effectiveOptions && effectiveOptions.length > 0 && onAnswerQuestion && (
-          <div className="my-3 flex flex-wrap gap-2">
-            {effectiveOptions.map((option) => (
-              <button
-                key={option.id}
-                onClick={() => onAnswerQuestion(option.id, option.value)}
-                className="px-3 py-2 text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-lg transition-colors"
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Content - AI回复内容 */}
-        <div className="prose prose-sm dark:prose-invert max-w-none">
-          {isStreaming ? (
-            <StreamingContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
-          ) : (
-            <MarkdownContent content={parsedContent.cleanedContent || content} onCopy={onCopy} copiedCode={copiedCode} />
-          )}
+        {/* 按 seq 排序渲染所有 stream items */}
+        <div className="space-y-2">
+          {sortedItems.map((item, index) => renderStreamItem(item, index))}
         </div>
       </>
     );
@@ -1042,7 +1024,7 @@ const MessageContent: React.FC<MessageContentProps> = ({
       {resultCards && resultCards.length > 0 && (
         <div className="mb-4 space-y-2">
           {resultCards.map((card, index) => (
-            <ResultCard
+            <ResultCardComponent
               key={`result-${index}`}
               title={card.title}
               status={card.status}
@@ -1287,7 +1269,7 @@ interface AIMessageProps {
   thinking?: string;
   toolCalls?: ToolCallInfo[];
   fileEdits?: FileEditInfo[];
-  streamingItems?: StreamingItem[];
+  streamingItems?: StreamEventItem[];
   todoItems?: TodoItem[];
   timestamp: number;
   isStreaming?: boolean;
@@ -1306,17 +1288,36 @@ interface AIMessageProps {
   isRetrying?: boolean;
   sendRetryCount?: number;
   isProcessing?: boolean;
+  // 从 ChatPanel 传入的 store 数据和方法
+  resultCards?: ResultCard[];
+  taskProgress?: {
+    status: TaskStatus;
+    currentPhase: string;
+    currentStep: number;
+    totalSteps: number;
+    message: string;
+  } | null;
+  collapsedThinking?: boolean;
+  collapsedToolCalls?: boolean;
+  toggleCollapsedThinking?: () => void;
+  toggleCollapsedToolCalls?: () => void;
 }
 
-const AIMessage: React.FC<AIMessageProps> = ({
+const AIMessageComponent: React.FC<AIMessageProps> = ({
   messageId, content, thinking, toolCalls, fileEdits, streamingItems, todoItems, timestamp, isStreaming, isSoloMode,
   onCopy, copiedCode, copiedMessageId, onCopyMessage, agentQuestions, onAnswerQuestion,
   expandedThinkingMsgs, expandedToolCalls, onToggleThinking, onToggleToolCall,
-  elapsedTime, isRetrying, sendRetryCount, isProcessing
+  elapsedTime, isRetrying, sendRetryCount, isProcessing,
+  resultCards,
+  taskProgress,
+  collapsedThinking,
+  collapsedToolCalls,
+  toggleCollapsedThinking,
+  toggleCollapsedToolCalls,
 }) => (
   <div className="px-4 py-3 group">
-    <AIMessageHeader 
-      timestamp={timestamp} 
+    <AIMessageHeader
+      timestamp={timestamp}
       isProcessing={isProcessing}
       isSoloMode={isSoloMode}
       elapsedTime={elapsedTime}
@@ -1340,8 +1341,14 @@ const AIMessage: React.FC<AIMessageProps> = ({
       onToggleToolCall={onToggleToolCall}
       onAnswerQuestion={onAnswerQuestion}
       messageId={messageId}
+      resultCards={resultCards}
+      taskProgress={taskProgress}
+      collapsedThinking={collapsedThinking}
+      collapsedToolCalls={collapsedToolCalls}
+      toggleCollapsedThinking={toggleCollapsedThinking}
+      toggleCollapsedToolCalls={toggleCollapsedToolCalls}
     />
-    
+
     {/* Message Actions */}
     <div className="flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
       <button
@@ -1364,6 +1371,46 @@ const AIMessage: React.FC<AIMessageProps> = ({
     </div>
   </div>
 );
+
+// 使用 React.memo 优化 AIMessage，避免不必要的重渲染
+// 自定义比较函数，深度比较关键属性
+const AIMessage = React.memo(AIMessageComponent, (prevProps, nextProps) => {
+  // 比较基本属性
+  if (prevProps.messageId !== nextProps.messageId) return false;
+  if (prevProps.content !== nextProps.content) return false;
+  if (prevProps.thinking !== nextProps.thinking) return false;
+  if (prevProps.timestamp !== nextProps.timestamp) return false;
+  if (prevProps.isStreaming !== nextProps.isStreaming) return false;
+  if (prevProps.isSoloMode !== nextProps.isSoloMode) return false;
+  if (prevProps.copiedCode !== nextProps.copiedCode) return false;
+  if (prevProps.copiedMessageId !== nextProps.copiedMessageId) return false;
+  if (prevProps.elapsedTime !== nextProps.elapsedTime) return false;
+  if (prevProps.isRetrying !== nextProps.isRetrying) return false;
+  if (prevProps.sendRetryCount !== nextProps.sendRetryCount) return false;
+  if (prevProps.isProcessing !== nextProps.isProcessing) return false;
+  if (prevProps.collapsedThinking !== nextProps.collapsedThinking) return false;
+  if (prevProps.collapsedToolCalls !== nextProps.collapsedToolCalls) return false;
+
+  // 比较数组长度
+  if (prevProps.toolCalls?.length !== nextProps.toolCalls?.length) return false;
+  if (prevProps.fileEdits?.length !== nextProps.fileEdits?.length) return false;
+  if (prevProps.streamingItems?.length !== nextProps.streamingItems?.length) return false;
+  if (prevProps.todoItems?.length !== nextProps.todoItems?.length) return false;
+  if (prevProps.agentQuestions?.length !== nextProps.agentQuestions?.length) return false;
+  if (prevProps.resultCards?.length !== nextProps.resultCards?.length) return false;
+
+  // 比较 Set
+  if (prevProps.expandedThinkingMsgs.size !== nextProps.expandedThinkingMsgs.size) return false;
+  if (prevProps.expandedToolCalls.size !== nextProps.expandedToolCalls.size) return false;
+
+  // 比较 taskProgress
+  if (prevProps.taskProgress?.status !== nextProps.taskProgress?.status) return false;
+  if (prevProps.taskProgress?.currentStep !== nextProps.taskProgress?.currentStep) return false;
+  if (prevProps.taskProgress?.totalSteps !== nextProps.taskProgress?.totalSteps) return false;
+
+  // 所有关键属性都相同，不需要重渲染
+  return true;
+});
 
 // 智能体提问组件
 const AgentQuestions: React.FC<{
@@ -1487,36 +1534,60 @@ export const ChatPanel: React.FC = () => {
   const shouldAutoScroll = useRef(true);
   const isUserScrolling = useRef(false);
 
-  const {
-    configs,
-    activeConfigId,
-    tasks,
-    activeTaskId,
-    isCreating,
-    isProcessing,
-    streamingMessage,
-    streamingThinking,
-    streamingToolCalls,
-    error,
-    createTask,
-    createConfig,
-    sendMessage,
-    loadConfigs,
-    loadTasks,
-    setError,
-    clearError,
-    startTask,
-    stopTask,
-    deleteTask,
-    setIsProcessing,
-    answerQuestion,
-    resultCards,
-    taskProgress,
-    collapsedThinking,
-    collapsedToolCalls,
-    toggleCollapsedThinking,
-    toggleCollapsedToolCalls,
-  } = useUnifiedAgentStore();
+  // 使用 selector 拆分订阅，降低重渲染成本
+  // 1. 当前任务相关 - 只订阅稳定状态，避免依赖高频变化的状态
+  const activeTaskId = useUnifiedAgentStore(state => state.activeTaskId);
+  // 使用 useShallow 优化 activeTask selector，避免每次 find 都返回新引用
+  const activeTask = useUnifiedAgentStore(
+    useShallow((state) => {
+      if (!state.activeTaskId) return null;
+      const task = state.tasks.find(t => t.id === state.activeTaskId);
+      if (!task) return null;
+      // 只返回必要的属性，避免订阅整个 task 对象
+      return {
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        messages: task.messages,
+        steps: task.steps,
+        todoItems: task.todoItems,
+        runtimeMode: task.runtimeMode,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      };
+    })
+  );
+  const isProcessing = useUnifiedAgentStore(state => state.isProcessing);
+  const isCreating = useUnifiedAgentStore(state => state.isCreating);
+
+  // 2. UI 折叠状态相关
+  const collapsedThinking = useUnifiedAgentStore(state => state.collapsedThinking);
+  const collapsedToolCalls = useUnifiedAgentStore(state => state.collapsedToolCalls);
+
+  // 3. Action 方法相关
+  const createTask = useUnifiedAgentStore(state => state.createTask);
+  const sendMessage = useUnifiedAgentStore(state => state.sendMessage);
+  const loadConfigs = useUnifiedAgentStore(state => state.loadConfigs);
+  const loadTasks = useUnifiedAgentStore(state => state.loadTasks);
+  const setError = useUnifiedAgentStore(state => state.setError);
+  const clearError = useUnifiedAgentStore(state => state.clearError);
+  const startTask = useUnifiedAgentStore(state => state.startTask);
+  const stopTask = useUnifiedAgentStore(state => state.stopTask);
+  const deleteTask = useUnifiedAgentStore(state => state.deleteTask);
+  const answerQuestion = useUnifiedAgentStore(state => state.answerQuestion);
+  const toggleCollapsedThinking = useUnifiedAgentStore(state => state.toggleCollapsedThinking);
+  const toggleCollapsedToolCalls = useUnifiedAgentStore(state => state.toggleCollapsedToolCalls);
+  // 新增：收口消息修改的 store action
+  const updateMessage = useUnifiedAgentStore(state => state.updateMessage);
+  const deleteMessageAction = useUnifiedAgentStore(state => state.deleteMessage);
+  const clearTaskMessages = useUnifiedAgentStore(state => state.clearTaskMessages);
+
+  // 4. 其他不常用状态
+  const configs = useUnifiedAgentStore(state => state.configs);
+  const error = useUnifiedAgentStore(state => state.error);
+
+  // 注意：高频流式状态（streamingMessage、streamingItems 等）由 StreamingMessage 组件独立订阅
+  // 这是关键优化，避免 ChatPanel 因流式状态变化而频繁重渲染
 
   const { workspacePath, openFiles, activeFilePath, updateFileContent } = useWorkspaceStore();
   const { selection, clearSelection } = useCodeEditorStore();
@@ -1527,11 +1598,11 @@ export const ChatPanel: React.FC = () => {
     ? configs.filter((c) => c.aiConfig?.id === activeAIConfig.id)
     : configs;
   const displayConfigs = filteredConfigs.length > 0 ? filteredConfigs : configs;
-  const activeConfig = displayConfigs.find((c) => c.id === activeConfigId) || displayConfigs[0];
+  const activeConfig = displayConfigs.find((c) => c.id === activeAIConfigId) || displayConfigs[0];
   const currentRuntimeMode: AgentRuntimeMode = activeConfig?.runtimeMode || 'chat';
   const isSoloMode = currentRuntimeMode === 'solo';
 
-  const activeTask = activeTaskId ? tasks.find(t => t.id === activeTaskId) : null;
+  // activeTask 已通过 selector 直接订阅，不再从 tasks 查找
 
   // Setup event listeners
   useEffect(() => {
@@ -1541,56 +1612,13 @@ export const ChatPanel: React.FC = () => {
     loadSettings();
   }, []);
 
-  // Sync local messages with store and add streaming message as temporary message
+  // 优化：只返回历史消息，流式消息由独立的 StreamingMessage 组件渲染
+  // 这是关键优化，避免 displayMessages 因流式状态变化而频繁重建
   const displayMessages = useMemo(() => {
-    if (!activeTaskId) return [];
-
-    const task = tasks.find((t) => t.id === activeTaskId);
-    if (!task) return [];
-
-    const messages: Message[] = task.messages.map((m) => ({
-      id: m.id,
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-      thinking: m.thinking,
-      toolCalls: m.toolCalls?.map(tc => ({
-        id: tc.id,
-        toolName: tc.toolName,
-        params: tc.params,
-        status: tc.status,
-        result: tc.result,
-        error: tc.error,
-      })),
-      timestamp: m.timestamp,
-      streamingItems: m.streamingItems,
-      agentQuestions: m.agentQuestions,
-      steps: task.steps,
-      todoItems: task.todoItems,
-    }));
-
-    if (isProcessing && (streamingMessage || streamingThinking || streamingToolCalls.length > 0)) {
-      const streamingMsg: Message = {
-        id: 'streaming',
-        role: 'assistant',
-        content: streamingMessage,
-        thinking: streamingThinking,
-        toolCalls: streamingToolCalls.map(tc => ({
-          id: tc.id,
-          toolName: tc.toolName,
-          params: tc.params,
-          status: tc.status,
-          result: tc.result,
-          error: tc.error,
-        })),
-        timestamp: Date.now(),
-        steps: task.steps,
-        todoItems: task.todoItems,
-      };
-      messages.push(streamingMsg);
-    }
-
-    return messages;
-  }, [tasks, activeTaskId, streamingMessage, streamingThinking, streamingToolCalls, isProcessing]);
+    if (!activeTask) return [];
+    // 直接返回历史消息，不处理流式消息
+    return activeTask.messages as Message[];
+  }, [activeTask?.messages]);
 
   // Smart auto scroll - optimized
   useEffect(() => {
@@ -1610,14 +1638,39 @@ export const ChatPanel: React.FC = () => {
     return () => scrollContainer.removeEventListener('scroll', handleScroll);
   }, []);
 
+  // 自动滚动效果 - 使用 requestAnimationFrame 优化性能
   useEffect(() => {
-    if (streamingEndRef.current) {
-      if (shouldAutoScroll.current || !isUserScrolling.current) {
-        streamingEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        isUserScrolling.current = false;
+    if (!isProcessing) return;
+
+    let rafId: number;
+    const scrollToBottom = () => {
+      if (streamingEndRef.current) {
+        if (shouldAutoScroll.current || !isUserScrolling.current) {
+          streamingEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          isUserScrolling.current = false;
+        }
       }
-    }
-  }, [displayMessages.length, streamingMessage, streamingThinking]);
+    };
+
+    // 使用 requestAnimationFrame 节流滚动操作
+    const throttledScroll = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(scrollToBottom);
+    };
+
+    // 监听 store 变化来触发滚动
+    const unsubscribe = useUnifiedAgentStore.subscribe(
+      (state) => state.streamingMessage,
+      () => {
+        throttledScroll();
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [isProcessing]);
 
   // Processing timer effect
   useEffect(() => {
@@ -1690,54 +1743,47 @@ export const ChatPanel: React.FC = () => {
   };
 
   const saveEditMessage = async (messageId: string) => {
-    if (!editInput.trim() || !activeTaskId) return;
+    if (!editInput.trim() || !activeTaskId || !activeTask) return;
 
-    // 找到并更新消息
-    const task = tasks.find(t => t.id === activeTaskId);
-    if (task) {
-      const messageIndex = task.messages.findIndex(m => m.id === messageId);
-      if (messageIndex !== -1) {
-        // 更新消息内容
-        task.messages[messageIndex].content = editInput.trim();
-        // 删除该消息之后的所有消息
-        task.messages = task.messages.slice(0, messageIndex + 1);
-        // 重新发送
-        await handleSend(editInput.trim());
+    // 找到消息索引
+    const messageIndex = activeTask.messages.findIndex(m => m.id === messageId);
+    if (messageIndex !== -1) {
+      // 使用 store action 更新消息内容（收口修改，避免直接突变）
+      updateMessage(activeTaskId, messageId, { content: editInput.trim() });
+
+      // 删除该消息之后的所有消息（需要逐个删除，保持收口原则）
+      const messagesToDelete = activeTask.messages.slice(messageIndex + 1);
+      for (const msg of messagesToDelete) {
+        deleteMessageAction(activeTaskId, msg.id);
       }
+
+      // 重新发送
+      await handleSend(editInput.trim());
     }
     cancelEditMessage();
   };
 
-  // 删除单条消息
+  // 删除单条消息（收口到 store action，避免直接突变）
   const deleteMessage = (messageId: string) => {
     if (!activeTaskId) return;
-    const task = tasks.find(t => t.id === activeTaskId);
-    if (task) {
-      task.messages = task.messages.filter(m => m.id !== messageId);
-    }
+    deleteMessageAction(activeTaskId, messageId);
   };
 
-  // 清空对话
+  // 清空对话（收口到 store action，避免直接突变）
   const clearConversation = () => {
     if (!activeTaskId) return;
-    const task = tasks.find(t => t.id === activeTaskId);
-    if (task) {
-      task.messages = [];
-    }
+    clearTaskMessages(activeTaskId);
     setInput('');
     setShowSlashMenu(false);
   };
 
   // 导出对话
   const exportConversation = () => {
-    if (!activeTaskId || displayMessages.length === 0) return;
-
-    const task = tasks.find(t => t.id === activeTaskId);
-    if (!task) return;
+    if (!activeTaskId || !activeTask || displayMessages.length === 0) return;
 
     const exportData = {
-      title: task.title,
-      mode: task.runtimeMode,
+      title: activeTask.title,
+      mode: activeTask.runtimeMode,
       exportedAt: new Date().toISOString(),
       messages: displayMessages.map(msg => ({
         role: msg.role,
@@ -1751,7 +1797,7 @@ export const ChatPanel: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `conversation-${task.title}-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `conversation-${activeTask.title}-${new Date().toISOString().split('T')[0]}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1770,16 +1816,24 @@ export const ChatPanel: React.FC = () => {
   const handleSend = async (retryContent?: string) => {
     if (isProcessing && !retryContent) {
       if (activeTaskId) {
-        // 如果有流式消息，先保存到任务中
-        if (streamingMessage || streamingThinking) {
-          const { addMessage, tasks } = useUnifiedAgentStore.getState();
+        // 从 streamingItems 提取内容，不再依赖 streamingMessage 和 streamingThinking
+        const { streamingItems, addMessage, tasks } = useUnifiedAgentStore.getState();
+        if (streamingItems.length > 0) {
+          // 从 streamingItems 中提取 content 和 thinking
+          const contentItems = streamingItems.filter(item => item.type === 'content');
+          const thinkingItems = streamingItems.filter(item => item.type === 'thinking');
+          
+          const content = contentItems.map(item => (item as any).text).join('');
+          const thinking = thinkingItems.map(item => (item as any).text).join('');
+          
+          // 只保留轻量字段，不保存 streamingItems（与正常完成路径保持一致）
           const streamingMsg: AgentMessage = {
             id: Date.now().toString(),
             role: 'assistant',
-            content: streamingMessage || '(已暂停)',
+            content: content || '(已暂停)',
             timestamp: Date.now(),
-            thinking: streamingThinking || undefined,
-            toolCalls: streamingToolCalls.length > 0 ? streamingToolCalls : undefined,
+            thinking: thinking || undefined,
+            // 注意：不保存 streamingItems，避免历史消息膨胀
           };
           addMessage(activeTaskId, streamingMsg);
           // 保存任务到磁盘
@@ -2010,7 +2064,7 @@ export const ChatPanel: React.FC = () => {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto scrollbar-thin" ref={scrollRef}>
-          {displayMessages.length === 0 && !streamingMessage && !isProcessing ? (
+          {displayMessages.length === 0 && !isProcessing ? (
             <div className="h-full flex flex-col items-center justify-center px-8">
               <div className={cn(
                 'w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ring-1',
@@ -2074,10 +2128,9 @@ export const ChatPanel: React.FC = () => {
                 </div>
               )}
 
-              {/* Messages */}
+              {/* Messages - 历史消息 */}
               {displayMessages.map((msg, index) => {
                 const isUser = msg.role === 'user';
-                const isStreaming = msg.id === 'streaming';
                 const isLastMessage = index === displayMessages.length - 1;
 
                 if (isUser) {
@@ -2165,7 +2218,7 @@ export const ChatPanel: React.FC = () => {
                       fileEdits={msg.fileEdits}
                       streamingItems={msg.streamingItems}
                       timestamp={msg.timestamp}
-                      isStreaming={isStreaming}
+                      isStreaming={false}
                       isSoloMode={isSoloMode}
                       onCopy={copyToClipboard}
                       copiedCode={copiedCode}
@@ -2173,14 +2226,12 @@ export const ChatPanel: React.FC = () => {
                       onCopyMessage={copyMessageContent}
                       agentQuestions={msg.agentQuestions}
                       onAnswerQuestion={(questionId, answer) => {
-                        // 找到消息在 task.messages 中的索引
-                        const task = tasks.find((t) => t.id === activeTaskId);
-                        if (task) {
-                          const messageIndex = task.messages.findIndex((m) => m.id === msg.id);
-                          if (messageIndex !== -1) {
-                            // 更新问题状态为已回答
-                            answerQuestion(activeTaskId!, messageIndex, questionId, answer);
-                          }
+                        // 找到消息在 activeTask.messages 中的索引
+                        if (!activeTask) return;
+                        const messageIndex = activeTask.messages.findIndex((m) => m.id === msg.id);
+                        if (messageIndex !== -1) {
+                          // 更新问题状态为已回答
+                          answerQuestion(activeTaskId!, messageIndex, questionId, answer);
                         }
                         // 设置输入并发送
                         setInput(answer);
@@ -2190,33 +2241,57 @@ export const ChatPanel: React.FC = () => {
                       expandedToolCalls={expandedToolCalls}
                       onToggleThinking={toggleThinking}
                       onToggleToolCall={toggleToolCall}
-                      elapsedTime={isStreaming ? elapsedTime : undefined}
-                      isRetrying={isStreaming ? isRetrying : undefined}
-                      sendRetryCount={isStreaming ? sendRetryCount : undefined}
-                      isProcessing={isStreaming ? isProcessing : undefined}
+                      elapsedTime={undefined}
+                      isRetrying={undefined}
+                      sendRetryCount={undefined}
+                      isProcessing={undefined}
+                      resultCards={undefined}
+                      taskProgress={undefined}
+                      collapsedThinking={collapsedThinking}
+                      collapsedToolCalls={collapsedToolCalls}
+                      toggleCollapsedThinking={toggleCollapsedThinking}
+                      toggleCollapsedToolCalls={toggleCollapsedToolCalls}
                     />
-
-                    {/* Streaming indicator - 改进的加载状态 */}
-                    {isStreaming && isProcessing && (
-                      <div className="flex items-center gap-3 mt-3 px-4">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '0ms' }} />
-                          <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
-                          <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
-                        </div>
-                        <span className="text-xs text-muted-foreground">
-                          {msg.thinking ? '思考中...' : msg.content ? '生成中...' : '准备中...'}
-                        </span>
-                        {elapsedTime > 0 && (
-                          <span className="text-[10px] text-muted-foreground/60">
-                            {formatDuration(elapsedTime)}
-                          </span>
-                        )}
-                      </div>
-                    )}
                   </div>
                 );
               })}
+
+              {/* Streaming Message - 独立的流式消息组件 */}
+              {isProcessing && (
+                <div ref={streamingEndRef}>
+                  <StreamingMessage
+                    isSoloMode={isSoloMode}
+                    onCopy={copyToClipboard}
+                    copiedCode={copiedCode}
+                    expandedThinkingMsgs={expandedThinkingMsgs}
+                    expandedToolCalls={expandedToolCalls}
+                    onToggleThinking={toggleThinking}
+                    onToggleToolCall={toggleToolCall}
+                    onAnswerQuestion={(questionId, answer) => {
+                      setInput(answer);
+                      setTimeout(() => handleSend(), 0);
+                    }}
+                    messageId="streaming"
+                  />
+
+                  {/* Streaming indicator */}
+                  <div className="flex items-center gap-3 mt-3 px-4">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '0ms' }} />
+                      <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '150ms' }} />
+                      <span className="w-2 h-2 bg-primary/60 rounded-full animate-pulse" style={{ animationDelay: '300ms' }} />
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      生成中...
+                    </span>
+                    {elapsedTime > 0 && (
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {formatDuration(elapsedTime)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -1,59 +1,11 @@
 import OpenAI from 'openai';
 import type { Stream } from 'openai/streaming';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
 import * as path from 'path';
-import { AIProviderConfig, ModelCapability, ContextPolicy, getEffectiveContextBudget, UserContextPreference } from '../../shared/types';
+import { AIProviderConfig, ModelCapability, ContextPolicy, getEffectiveContextBudget, UserContextPreference, StreamEventItem } from '../../shared/types';
 import { PREDEFINED_PROVIDERS } from './aiService';
 import { AIToolService, ToolCall, ToolResult, TOOLS, ToolName } from './aiToolService';
-
-// 文件日志功能
-let logFilePath: string = '';
-
-// 初始化日志文件路径
-function initLogFile(): void {
-  if (logFilePath) return;
-  try {
-    const { app } = require('electron');
-    const userDataPath = app.getPath('userData');
-    const logDir = path.join(userDataPath, 'logs');
-    
-    try {
-      if (!fsSync.existsSync(logDir)) {
-        fsSync.mkdirSync(logDir, { recursive: true });
-      }
-    } catch {}
-    
-    const date = new Date().toISOString().split('T')[0];
-    logFilePath = path.join(logDir, `ywcoder-${date}.log`);
-  } catch {}
-}
-
-function fileLog(message: string): void {
-  try {
-    initLogFile();
-    if (!logFilePath) return;
-    const timestamp = new Date().toISOString();
-    const logLine = `[${timestamp}] ${message}\n`;
-    fsSync.appendFileSync(logFilePath, logLine);
-  } catch (e) {
-    // 静默失败，不影响主流程
-  }
-}
-
-// 重写 console.log 同时输出到文件
-const originalLog = console.log;
-console.log = (...args: any[]) => {
-  const message = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-  ).join(' ');
-  originalLog.apply(console, args);
-  fileLog(message);
-};
-
-// 启动时写入日志
-fileLog('=== YWCodeR 启动 ===');
-fileLog('日志系统已初始化');
+import { logger } from '../utils/logger';
 
 export interface StreamChunk {
   type: 'thinking' | 'thinking_complete' | 'content' | 'tool_call' | 'tool_result' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'todo_update' | 'agent_question';
@@ -81,6 +33,8 @@ export interface StreamChunk {
       value: string;
     }>;
   };
+  // 标准化的流式事件（用于事件流驱动渲染）
+  streamEvent?: StreamEventItem;
 }
 
 export type StreamCallback = (chunk: StreamChunk) => void;
@@ -98,6 +52,35 @@ const DEFAULT_CONTEXT_LENGTH = 4000;
 const SYSTEM_PROMPT_RESERVE = 1000;
 // 工具结果预留长度
 const TOOL_RESULT_RESERVE = 2000;
+
+// 预算管理常量
+const BUDGET_CONFIG = {
+  // 预留的 completion tokens（模型输出空间）
+  // 根据上下文长度动态调整，默认 8000
+  reservedCompletionTokens: 8000,
+  // 预留的工具调用空间
+  reservedToolTokens: 2000,
+  // 安全边距 tokens
+  safetyMarginTokens: 500,
+};
+
+// Token 预算接口
+interface TokenBudget {
+  // 总预算（模型上下文窗口）
+  totalBudget: number;
+  // 系统提示词占用
+  systemPromptTokens: number;
+  // 预留的 completion tokens
+  reservedCompletionTokens: number;
+  // 预留的工具调用空间
+  reservedToolTokens: number;
+  // 安全边距
+  safetyMarginTokens: number;
+  // history 可用预算 = total - system - completion - tool - safety
+  promptBudgetTokens: number;
+  // 实际设置的 max_tokens
+  maxTokens: number;
+}
 
 // 默认模型能力配置 (32KB)
 const DEFAULT_MODEL_CAPABILITY: ModelCapability = {
@@ -172,29 +155,94 @@ function estimateTokens(content: string): number {
 }
 
 /**
+ * 计算 Token 预算
+ * @param totalBudget 总预算（模型上下文窗口）
+ * @param systemPromptContent 系统提示词内容（不是长度）
+ * @param config 预算配置
+ * @returns TokenBudget 预算分配结果
+ */
+function calculateTokenBudget(
+  totalBudget: number,
+  systemPromptContent: string,
+  config: typeof BUDGET_CONFIG = BUDGET_CONFIG
+): TokenBudget {
+  // 基于真实 system prompt 内容估算 tokens
+  const systemPromptTokens = estimateTokens(systemPromptContent || '');
+
+  // 计算 history 可用预算
+  const promptBudgetTokens = Math.max(0,
+    totalBudget
+    - systemPromptTokens
+    - config.reservedCompletionTokens
+    - config.reservedToolTokens
+    - config.safetyMarginTokens
+  );
+
+  const budget: TokenBudget = {
+    totalBudget,
+    systemPromptTokens,
+    reservedCompletionTokens: config.reservedCompletionTokens,
+    reservedToolTokens: config.reservedToolTokens,
+    safetyMarginTokens: config.safetyMarginTokens,
+    promptBudgetTokens,
+    maxTokens: config.reservedCompletionTokens,
+  };
+
+  return budget;
+}
+
+/**
+ * 打印预算日志
+ */
+function logTokenBudget(budget: TokenBudget, traceId: string): void {
+  logger.info('token_budget_calculated', {
+    traceId,
+    totalBudget: budget.totalBudget,
+    systemPromptTokens: budget.systemPromptTokens,
+    reservedCompletionTokens: budget.reservedCompletionTokens,
+    reservedToolTokens: budget.reservedToolTokens,
+    safetyMarginTokens: budget.safetyMarginTokens,
+    promptBudgetTokens: budget.promptBudgetTokens,
+    maxTokens: budget.maxTokens,
+    availableForHistory: budget.promptBudgetTokens,
+  });
+}
+
+/**
  * 裁剪历史消息以适应上下文长度
+ * @param messages 历史消息列表
+ * @param promptBudgetTokens history 可用预算（来自 calculateTokenBudget）
+ * @param traceId 用于日志追踪
+ * @returns 裁剪后的消息列表
  */
 function trimHistoryMessages(
   messages: Message[],
-  maxTokens: number,
-  systemPromptLength: number
+  promptBudgetTokens: number,
+  traceId: string
 ): Message[] {
-  const availableTokens = maxTokens - systemPromptLength - TOOL_RESULT_RESERVE;
   let currentTokens = 0;
   const trimmedMessages: Message[] = [];
 
-  // 临时调试日志 - 验证裁剪策略
-  console.log('[DEBUG] trimHistoryMessages - 输入消息数:', messages.length);
-  console.log('[DEBUG] trimHistoryMessages - maxTokens:', maxTokens, 'availableTokens:', availableTokens);
+  logger.info('trim_history_start', {
+    traceId,
+    inputMessageCount: messages.length,
+    promptBudgetTokens,
+  });
 
   // 从后往前遍历，保留最近的消息
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     const msgTokens = estimateTokens(msg.content || '');
 
-    if (currentTokens + msgTokens > availableTokens) {
+    if (currentTokens + msgTokens > promptBudgetTokens) {
       // 如果超出限制，停止添加
-      console.log('[DEBUG] trimHistoryMessages - 裁剪停止于第', i, '条消息, 当前累积:', currentTokens, '新消息:', msgTokens, '超出限制');
+      logger.info('trim_history_stopped', {
+        traceId,
+        stoppedAtIndex: i,
+        currentTokens,
+        newMessageTokens: msgTokens,
+        budgetExceeded: true,
+      });
       break;
     }
 
@@ -202,7 +250,13 @@ function trimHistoryMessages(
     currentTokens += msgTokens;
   }
 
-  console.log('[DEBUG] trimHistoryMessages - 输出消息数:', trimmedMessages.length, '总tokens:', currentTokens);
+  logger.info('trim_history_complete', {
+    traceId,
+    outputMessageCount: trimmedMessages.length,
+    totalTokens: currentTokens,
+    trimmedCount: messages.length - trimmedMessages.length,
+  });
+
   return trimmedMessages;
 }
 
@@ -392,11 +446,295 @@ export class AIStreamService {
   private processContent(content: string): { thinking: string; cleanContent: string } {
     // 先提取思考过程
     const { thinking, content: afterThink } = this.parseThinking(content);
-    
+
     // 再过滤工具调用
     const cleanContent = this.filterToolCalls(afterThink);
-    
+
     return { thinking, cleanContent };
+  }
+
+  /**
+   * 检查 JSON 是否可能被截断
+   * @param jsonStr JSON 字符串
+   * @param finishReason 流式响应的 finish_reason
+   * @returns 是否高概率被截断
+   */
+  private isLikelyTruncatedJson(jsonStr: string, finishReason: string | null): boolean {
+    if (!jsonStr || jsonStr.length === 0) return true;
+
+    // 检查括号平衡
+    let braceCount = 0;
+    let bracketCount = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (const char of jsonStr) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"' && !escaped) {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (char === '{') braceCount++;
+        if (char === '}') braceCount--;
+        if (char === '[') bracketCount++;
+        if (char === ']') bracketCount--;
+      }
+    }
+
+    // 特征1: 明确因长度限制停止（最强信号）
+    const isLengthLimited = finishReason === 'length';
+
+    // 特征2: 括号不平衡
+    const hasUnbalancedBrackets = braceCount !== 0 || bracketCount !== 0;
+
+    // 特征3: 引号未闭合
+    const hasUnclosedString = inString;
+
+    // 特征4: 以明显的中间状态结束
+    const lastChar = jsonStr.trim().slice(-1);
+    const endsMidField = lastChar === ',' || lastChar === ':' || lastChar === '"' || lastChar === '\\';
+
+    // 特征5: 末尾是半个关键字或值
+    const endsMidToken = /[:\s,\[\{]$/.test(jsonStr.trim()) ||
+                         jsonStr.trim().endsWith('true') ||
+                         jsonStr.trim().endsWith('false') ||
+                         jsonStr.trim().endsWith('null');
+
+    // 截断判定：必须满足 finishReason === 'length' 或至少两个结构特征
+    const structuralSigns = [
+      hasUnbalancedBrackets,
+      hasUnclosedString,
+      endsMidField,
+      endsMidToken
+    ].filter(Boolean).length;
+
+    // 高概率截断的条件：
+    // 1. 明确因长度限制停止
+    // 2. 或同时满足：括号不平衡 + 其他任一结构特征
+    // 3. 或同时满足：引号未闭合 + finishReason === 'length'
+    const isLikelyTruncated = isLengthLimited ||
+                              (hasUnbalancedBrackets && structuralSigns >= 2) ||
+                              (hasUnclosedString && isLengthLimited);
+
+    // 如果结构完整但解析失败，可能是格式错误而非截断
+    if (!isLikelyTruncated) {
+      try {
+        JSON.parse(jsonStr);
+        return false;
+      } catch {
+        // 结构完整但解析失败，认为是格式错误，不进入补救
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * 补救截断的工具参数
+   */
+  private async remediateTruncatedArguments(
+    toolCall: any,
+    messages: Message[],
+    client: OpenAI,
+    model: string,
+    requestParams: any,
+    traceId: string,
+    roundCount: number,
+    finishReason: string | null,
+    baseSystemPrompt: string,
+    contextLength: number,
+    maxAttempts: number = 3
+  ): Promise<{ success: boolean; parsedArgs?: any; attempts: number; error?: string }> {
+    const args = toolCall.function.arguments;
+
+    // 首先检查是否真的被截断（传入 finishReason 进行更精确的判断）
+    if (!this.isLikelyTruncatedJson(args, finishReason)) {
+      return {
+        success: false,
+        attempts: 0,
+        error: 'Arguments do not appear to be truncated (finishReason: ' + finishReason + '), parse error may be due to other reasons',
+      };
+    }
+
+    logger.info('tool_arguments_truncation_detected', {
+      traceId,
+      toolCallId: toolCall.id,
+      functionName: toolCall.function.name,
+      argumentsLength: args.length,
+      finishReason,
+    });
+
+    // 使用统一的预算系统计算补救请求的预算
+    const budget = calculateTokenBudget(contextLength, baseSystemPrompt);
+    logTokenBudget(budget, traceId);
+
+    // 1. 先估算 remediation 附加消息的 token 开销
+    const remediationUserInstruction = `你刚才调用的 ${toolCall.function.name} 工具参数似乎被截断了（参数长度：${args.length}）。请继续完成这个工具调用，提供完整的 JSON 参数。注意：不要重复已经输出的内容，只需补充缺失的部分。`;
+    const assistantToolCallMessage = JSON.stringify({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: toolCall.id,
+        type: 'function',
+        function: {
+          name: toolCall.function.name,
+          arguments: args,
+        },
+      }],
+    });
+
+    const remediationOverheadTokens =
+      estimateTokens(assistantToolCallMessage) +
+      estimateTokens(remediationUserInstruction);
+
+    // 2. 计算实际可用的 history 预算（减去 remediation 附加消息的开销）
+    const availableHistoryBudget = Math.max(0, budget.promptBudgetTokens - remediationOverheadTokens);
+
+    // 3. 用 availableHistoryBudget 裁剪历史消息
+    const trimmedMessagesForRemediation = trimHistoryMessages(
+      messages,
+      availableHistoryBudget,
+      traceId
+    );
+
+    // 4. 构建补救消息：system + 裁剪后的历史 + assistant(截断的tool_call) + user(补救指令)
+    // 确保总 prompt token 不超过预算
+    const remediationMessages: Message[] = [
+      { role: 'system', content: baseSystemPrompt },
+      ...trimmedMessagesForRemediation,
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: toolCall.id,
+          type: 'function',
+          function: {
+            name: toolCall.function.name,
+            arguments: args,
+          },
+        }],
+      },
+      {
+        role: 'user',
+        content: remediationUserInstruction,
+      },
+    ];
+
+    // 计算最终的 prompt tokens
+    const finalPromptTokens =
+      budget.systemPromptTokens +
+      trimmedMessagesForRemediation.reduce((sum, m) => sum + estimateTokens(m.content || ''), 0) +
+      remediationOverheadTokens;
+
+    logger.info('tool_arguments_remediation_budget_calculated', {
+      traceId,
+      toolCallId: toolCall.id,
+      remediationOverheadTokens,
+      availableHistoryBudget,
+      promptBudgetTokens: budget.promptBudgetTokens,
+      finalPromptTokens,
+      maxTokens: budget.maxTokens,
+      originalMessagesCount: messages.length,
+      trimmedMessagesCount: trimmedMessagesForRemediation.length,
+    });
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        logger.info('tool_arguments_remediation_attempt', {
+          traceId,
+          toolCallId: toolCall.id,
+          attempt,
+          maxAttempts,
+        });
+
+        // 补救请求使用统一的预算逻辑
+        const remediationResponse = await client.chat.completions.create({
+          model,
+          messages: remediationMessages as any,
+          stream: false,
+          max_tokens: budget.maxTokens, // 使用统一预算中的 maxTokens
+          temperature: 0.3,
+        });
+
+        const completion = remediationResponse.choices[0]?.message;
+        if (completion?.tool_calls && completion.tool_calls.length > 0) {
+          const newToolCall = completion.tool_calls[0];
+          const newArgs = newToolCall.function?.arguments;
+
+          if (newArgs) {
+            try {
+              const parsedArgs = JSON.parse(newArgs);
+              logger.info('tool_arguments_remediation_success', {
+                traceId,
+                toolCallId: toolCall.id,
+                attempt,
+              });
+              return { success: true, parsedArgs, attempts: attempt };
+            } catch (parseError) {
+              logger.warn('tool_arguments_remediation_parse_failed', {
+                traceId,
+                toolCallId: toolCall.id,
+                attempt,
+                error: parseError instanceof Error ? parseError.message : String(parseError),
+              });
+              // 继续下一次尝试
+            }
+          }
+        }
+
+        // 如果没有返回 tool_calls，尝试从 content 中解析
+        if (completion?.content) {
+          try {
+            // 尝试直接解析 content 作为 JSON
+            const parsedArgs = JSON.parse(completion.content);
+            logger.info('tool_arguments_remediation_success_from_content', {
+              traceId,
+              toolCallId: toolCall.id,
+              attempt,
+            });
+            return { success: true, parsedArgs, attempts: attempt };
+          } catch {
+            // 尝试从 content 中提取 JSON
+            const jsonMatch = completion.content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                const parsedArgs = JSON.parse(jsonMatch[0]);
+                logger.info('tool_arguments_remediation_success_from_content_json', {
+                  traceId,
+                  toolCallId: toolCall.id,
+                  attempt,
+                });
+                return { success: true, parsedArgs, attempts: attempt };
+              } catch {
+                // 继续下一次尝试
+              }
+            }
+          }
+        }
+      } catch (error) {
+        logger.error('tool_arguments_remediation_error', {
+          traceId,
+          toolCallId: toolCall.id,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return {
+      success: false,
+      attempts: maxAttempts,
+      error: `Failed to remediate truncated arguments after ${maxAttempts} attempts`,
+    };
   }
 
   /**
@@ -412,20 +750,21 @@ export class AIStreamService {
       selection?: { filePath: string; code: string; startLine: number; endLine: number; language: string };
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
       userPreference?: UserContextPreference;
-    }
+      skipUserInputAppend?: boolean;
+    },
+    traceId?: string
   ): Promise<void> {
+    // 使用传入的 traceId 或生成新的
+    const effectiveTraceId = traceId || logger.generateTraceId('chat');
+    // 用于错误处理时记录当前轮数
+    let currentRound = 0;
+
     const client = this.getClient(config);
     const model = this.getModel(config);
     const toolService = new AIToolService(workspacePath);
 
-    // 调试日志
-    console.log('[DEBUG] streamExecute 调用');
-    console.log('[DEBUG] model:', model);
-    console.log('[DEBUG] provider:', config.provider);
-
     // 检测模型能力
     const useFunctionCall = detectFunctionCallSupport(model, config);
-    console.log('[DEBUG] useFunctionCall:', useFunctionCall);
     const modelCapability: ModelCapability = {
       modelId: model,
       maxContextWindow: getContextLength(config),
@@ -435,12 +774,18 @@ export class AIStreamService {
     const contextLength = effectiveContextBudget;
     const maxTokens = config.maxTokens || 4000;
 
-    // 临时调试日志 - 验证上下文预算计算
-    console.log('[DEBUG] ========== 上下文预算验证 ==========');
-    console.log('[DEBUG] modelCapability:', JSON.stringify(modelCapability));
-    console.log('[DEBUG] userPreference:', JSON.stringify(userPreference));
-    console.log('[DEBUG] effectiveContextBudget:', effectiveContextBudget, '(bytes)', effectiveContextBudget / 1024, 'KB');
-    console.log('[DEBUG] ======================================');
+    // 记录请求开始 - 使用统一的 traceId 字段名
+    logger.info('chat_request_start', {
+      traceId: effectiveTraceId,
+      model,
+      provider: config.provider,
+      useFunctionCall,
+      toolsCount: TOOLS.length,
+      workspacePath,
+      userInputLength: userInput.length,
+      contextLength,
+      maxTokens
+    });
 
     // 构建基础系统提示词 - 参考业内最佳实践
     // 使用数组拼接避免 TypeScript 解析问题
@@ -669,30 +1014,78 @@ export class AIStreamService {
       }
     }
 
-    // 添加当前用户输入
-    historyMessages.push({ role: 'user', content: userInput });
-
-    // 裁剪历史消息以适应上下文长度
-    const systemPromptLength = estimateTokens(baseSystemPrompt);
-    const trimmedHistory = trimHistoryMessages(historyMessages, contextLength, systemPromptLength);
+    // 添加当前用户输入（如果 history 中没有且未标记跳过）
+    const shouldSkipUserInput = context?.skipUserInputAppend;
+    const lastMessage = historyMessages[historyMessages.length - 1];
+    const isLastMessageUser = lastMessage?.role === 'user';
+    
+    if (!shouldSkipUserInput || !isLastMessageUser) {
+      // 如果 history 最后一条不是 user，或者没有标记跳过，则追加 userInput
+      if (!isLastMessageUser) {
+        historyMessages.push({ role: 'user', content: userInput });
+        logger.info('chat_user_input_appended', {
+          traceId: effectiveTraceId,
+          reason: 'last_message_not_user',
+          historyLength: context?.history?.length || 0
+        });
+      } else if (!shouldSkipUserInput) {
+        historyMessages.push({ role: 'user', content: userInput });
+        logger.info('chat_user_input_appended', {
+          traceId: effectiveTraceId,
+          reason: 'no_skip_flag',
+          historyLength: context?.history?.length || 0
+        });
+      }
+    } else {
+      logger.info('chat_user_input_skipped', {
+        traceId: effectiveTraceId,
+        reason: 'already_in_history',
+        historyLength: context?.history?.length || 0
+      });
+    }
 
     // 构建最终消息数组（不包含 system 消息，后面单独添加）
-    let messages: Message[] = [...trimmedHistory];
+    let messages: Message[] = [...historyMessages];
 
     let allThinking = '';
+    // 跟踪整个对话过程中的工具调用总数
+    let totalToolCalls = 0;
+    let hasToolCallInSession = false;
+
+    // 自动续写相关状态
+    let continuationCount = 0;
+    const maxContinuations = 3;
+    let isContinuation = false;
+    let accumulatedContent = '';
+
+    // 流式事件序列号计数器（用于事件流驱动渲染）
+    let streamEventSeq = 0;
+    // 跟踪已发送的 tool 事件（用于更新而不是重复创建）
+    const sentToolEvents = new Map<string, number>();
+
+    // 辅助函数：生成下一个序列号
+    const getNextSeq = () => ++streamEventSeq;
 
     try {
       // 使用 while 循环，限制最大轮数防止无限循环
       let roundCount = 0;
       const maxRounds = 30; // 增加最大轮数，让AI有足够时间收集信息并生成回复
-      
+
       while (roundCount < maxRounds) {
         roundCount++;
+        currentRound = roundCount;
+
+        // 每轮重新计算 Token 预算（因为 messages 会不断增长）
+        const budget = calculateTokenBudget(contextLength, baseSystemPrompt);
+        logTokenBudget(budget, effectiveTraceId);
+
+        // 每轮重新裁剪历史消息以适应上下文长度
+        const trimmedMessages = trimHistoryMessages(messages, budget.promptBudgetTokens, effectiveTraceId);
 
         // 每次请求都重新构建消息数组，确保 system 消息在最前面且只出现一次
         const requestMessages: Message[] = [
           { role: 'system', content: baseSystemPrompt },
-          ...messages,
+          ...trimmedMessages,
         ];
 
         // ========== 调试日志：发送请求消息信息 ==========
@@ -712,7 +1105,8 @@ export class AIStreamService {
         };
 
         requestParams.temperature = 0.3;
-        requestParams.max_tokens = maxTokens;
+        // 使用预算中预留的 completion tokens
+        requestParams.max_tokens = budget.maxTokens;
 
         // MiniMax 模型启用 reasoning_split，将思考内容分离到 reasoning_details 字段
         if (model.toLowerCase().includes('minimax')) {
@@ -721,7 +1115,6 @@ export class AIStreamService {
 
         // 如果支持 Function Call，添加工具定义
         if (useFunctionCall) {
-          console.log('[DEBUG] Function Call 已启用，工具数量:', TOOLS.length);
           requestParams.tools = TOOLS.map(tool => ({
             type: 'function' as const,
             function: {
@@ -731,11 +1124,19 @@ export class AIStreamService {
             },
           }));
           requestParams.tool_choice = 'auto';
-        } else {
-          console.log('[DEBUG] Function Call 未启用');
         }
 
-
+        // 记录请求参数
+        logger.info('chat_request_params', {
+          traceId: effectiveTraceId,
+          round: roundCount,
+          model,
+          messageCount: requestMessages.length,
+          hasTools: !!requestParams.tools,
+          toolsCount: requestParams.tools?.length || 0,
+          temperature: requestParams.temperature,
+          maxTokens: requestParams.max_tokens
+        });
 
         let stream;
         const maxRetries = 3;
@@ -802,6 +1203,9 @@ export class AIStreamService {
         // 用于 todo 标签
         let inTodoBlock = false;
         let todoContent = '';
+        
+        // 用于捕获 finish_reason
+        let finishReason: string | null = null;
 
         try {
           for await (const chunk of stream) {
@@ -810,7 +1214,20 @@ export class AIStreamService {
               continue;
             }
             
-            const delta = chunk.choices[0]?.delta;
+            // 捕获 finish_reason
+            const choice = chunk.choices[0];
+            if (choice?.finish_reason) {
+              finishReason = choice.finish_reason;
+              logger.info('stream_finish_reason_detected', {
+                traceId: effectiveTraceId,
+                round: roundCount,
+                finishReason,
+                continuationCount,
+                contentLength: fullContent.length,
+              });
+            }
+            
+            const delta = choice?.delta;
             if (!delta) continue;
 
             // 处理 Function Call (OpenAI 原生格式)
@@ -870,11 +1287,24 @@ export class AIStreamService {
                     console.log(`[AIStreamService] <file> tag started, path: ${fileEditPath}`);
 
                     // 发送 tool_start 回调，在对话界面展示文件操作
+                    const seq = getNextSeq();
+                    const toolEventId = `tool_${fileEditToolCallId}`;
+                    sentToolEvents.set(fileEditToolCallId, seq);
                     callback({
                       type: 'tool_start',
                       toolName: 'edit_file' as ToolName,
                       toolParams: { file_path: fileEditPath },
                       toolCallId: fileEditToolCallId,
+                      streamEvent: {
+                        id: toolEventId,
+                        seq,
+                        type: 'tool',
+                        toolCallId: fileEditToolCallId,
+                        toolName: 'edit_file',
+                        params: { file_path: fileEditPath },
+                        status: 'running',
+                        timestamp: Date.now(),
+                      }
                     });
 
                     // 通知前端打开文件
@@ -888,7 +1318,18 @@ export class AIStreamService {
                     // 将 <file> 标签前的内容作为普通内容输出
                     const beforeFile = buffer.slice(0, fileStartMatch.index);
                     if (beforeFile) {
-                      callback({ type: 'content', content: beforeFile });
+                      const seq = getNextSeq();
+                      callback({
+                        type: 'content',
+                        content: beforeFile,
+                        streamEvent: {
+                          id: `content_${Date.now()}_${seq}`,
+                          seq,
+                          type: 'content',
+                          text: beforeFile,
+                          timestamp: Date.now(),
+                        },
+                      });
                     }
 
                     // 移除已处理的标签，保留标签后的内容
@@ -944,6 +1385,8 @@ export class AIStreamService {
                       }
 
                     // 发送 tool_end 回调，根据实际结果返回状态
+                    const endSeq = getNextSeq();
+                    const endToolEventId = `tool_${fileEditToolCallId}`;
                     callback({
                       type: 'tool_end',
                       toolName: 'edit_file' as ToolName,
@@ -954,6 +1397,18 @@ export class AIStreamService {
                         data: writeSuccess ? { file_path: fileEditPath } : undefined,
                       },
                       toolCallId: fileEditToolCallId,
+                      streamEvent: {
+                        id: endToolEventId,
+                        seq: endSeq,
+                        type: 'tool',
+                        toolCallId: fileEditToolCallId,
+                        toolName: 'edit_file',
+                        params: { file_path: fileEditPath },
+                        status: writeSuccess ? 'completed' : 'error',
+                        result: writeSuccess ? { file_path: fileEditPath } : undefined,
+                        error: writeError ? `文件写入失败: ${writeError.message} (${(writeError as any).code || 'unknown'})` : undefined,
+                        timestamp: Date.now(),
+                      }
                     });
 
                     // 重置状态
@@ -996,7 +1451,18 @@ export class AIStreamService {
                   if (beforeThink) {
                     const filtered = this.filterToolCalls(beforeThink);
                     if (filtered) {
-                      callback({ type: 'content', content: filtered });
+                      const seq = getNextSeq();
+                      callback({
+                        type: 'content',
+                        content: filtered,
+                        streamEvent: {
+                          id: `content_${Date.now()}_${seq}`,
+                          seq,
+                          type: 'content',
+                          text: filtered,
+                          timestamp: Date.now(),
+                        },
+                      });
                     }
                   }
                   // 进入 think 块
@@ -1016,14 +1482,37 @@ export class AIStreamService {
                   if (finalThinkChunk) {
                     thinkContent += finalThinkChunk;
                     // 发送最后的 think 内容
-                    callback({ type: 'thinking', content: finalThinkChunk });
+                    const seq = getNextSeq();
+                    callback({
+                      type: 'thinking',
+                      content: finalThinkChunk,
+                      streamEvent: {
+                        id: `thinking_${Date.now()}_${seq}`,
+                        seq,
+                        type: 'thinking',
+                        text: finalThinkChunk,
+                        timestamp: Date.now(),
+                      }
+                    });
                   }
                   // 记录完整的 think 内容到 roundThinking（用于历史记录）
                   if (thinkContent) {
                     roundThinking += (roundThinking ? '\n' : '') + thinkContent;
                   }
                   // 发送思考完成信号，让前端知道思考过程已结束
-                  callback({ type: 'thinking_complete', content: roundThinking });
+                  const completeSeq = getNextSeq();
+                  callback({
+                    type: 'thinking_complete',
+                    content: roundThinking,
+                    streamEvent: {
+                      id: `thinking_${Date.now()}_${completeSeq}`,
+                      seq: completeSeq,
+                      type: 'thinking',
+                      text: roundThinking,
+                      done: true,
+                      timestamp: Date.now(),
+                    }
+                  });
                   // 输出 think 之后的内容
                   const afterThink = buffer.slice(thinkEndIndex + 9); // 跳过 '</think>'
                   console.log(`[AIStreamService] Content after </think>: "${afterThink.slice(0, 50)}..."`);
@@ -1038,7 +1527,18 @@ export class AIStreamService {
                 } else {
                   // think 块继续 - 实时发送思考内容，让用户看到 AI 的思考过程
                   thinkContent += buffer;
-                  callback({ type: 'thinking', content: buffer });
+                  const seq = getNextSeq();
+                  callback({
+                    type: 'thinking',
+                    content: buffer,
+                    streamEvent: {
+                      id: `thinking_${Date.now()}_${seq}`,
+                      seq,
+                      type: 'thinking',
+                      text: buffer,
+                      timestamp: Date.now(),
+                    }
+                  });
                   buffer = '';
                   continue;
                 }
@@ -1053,7 +1553,18 @@ export class AIStreamService {
                   if (beforeTodo) {
                     const filtered = this.filterToolCalls(beforeTodo);
                     if (filtered) {
-                      callback({ type: 'content', content: filtered });
+                      const seq = getNextSeq();
+                      callback({
+                        type: 'content',
+                        content: filtered,
+                        streamEvent: {
+                          id: `content_${Date.now()}_${seq}`,
+                          seq,
+                          type: 'content',
+                          text: filtered,
+                          timestamp: Date.now(),
+                        },
+                      });
                     }
                   }
                   // 进入 todo 块
@@ -1074,7 +1585,8 @@ export class AIStreamService {
                   todoContent += finalTodoChunk;
 
                   // 解析 todo 内容
-                  const todoItems: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' }> = [];
+                  const now = Date.now();
+                  const todoItems: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' | 'failed'; createdAt: number; updatedAt: number }> = [];
                   const taskRegex = /<task\s+id="([^"]+)"\s+status="([^"]+)">(.*?)<\/task>/g;
                   let taskMatch;
                   while ((taskMatch = taskRegex.exec(todoContent)) !== null) {
@@ -1082,13 +1594,23 @@ export class AIStreamService {
                       id: taskMatch[1],
                       status: taskMatch[2] as 'pending' | 'in_progress' | 'completed' | 'failed',
                       content: taskMatch[3].trim(),
+                      createdAt: now,
+                      updatedAt: now,
                     });
                   }
 
                   if (todoItems.length > 0) {
+                    const seq = getNextSeq();
                     callback({
                       type: 'todo_update',
                       todoItems,
+                      streamEvent: {
+                        id: `todo_${Date.now()}_${seq}`,
+                        seq,
+                        type: 'todo',
+                        items: todoItems,
+                        timestamp: Date.now(),
+                      },
                     });
                   }
 
@@ -1118,7 +1640,18 @@ export class AIStreamService {
                   if (beforeQuestion) {
                     const filtered = this.filterToolCalls(beforeQuestion);
                     if (filtered) {
-                      callback({ type: 'content', content: filtered });
+                      const seq = getNextSeq();
+                      callback({
+                        type: 'content',
+                        content: filtered,
+                        streamEvent: {
+                          id: `content_${Date.now()}_${seq}`,
+                          seq,
+                          type: 'content',
+                          text: filtered,
+                          timestamp: Date.now(),
+                        },
+                      });
                     }
                   }
                   // 进入 question 块
@@ -1163,12 +1696,22 @@ export class AIStreamService {
 
                   if (finalQuestionText) {
                     console.log(`[AIStreamService] Sending agent_question: ${questionId}, text: ${finalQuestionText}`);
+                    const seq = getNextSeq();
                     callback({
                       type: 'agent_question',
                       question: {
                         id: questionId,
                         question: finalQuestionText,
                         options: options.length > 0 ? options : undefined,
+                      },
+                      streamEvent: {
+                        id: `question_${questionId}`,
+                        seq,
+                        type: 'question',
+                        questionId: questionId,
+                        question: finalQuestionText,
+                        options: options.length > 0 ? options : undefined,
+                        timestamp: Date.now(),
                       },
                     });
                   } else {
@@ -1198,7 +1741,18 @@ export class AIStreamService {
                 if (filtered) {
                   // 直接发送内容，不累积
                   console.log('[AIStreamService] Sending content:', filtered.slice(0, 50), '...');
-                  callback({ type: 'content', content: filtered });
+                  const seq = getNextSeq();
+                  callback({
+                    type: 'content',
+                    content: filtered,
+                    streamEvent: {
+                      id: `content_${Date.now()}_${seq}`,
+                      seq,
+                      type: 'content',
+                      text: filtered,
+                      timestamp: Date.now(),
+                    },
+                  });
                 }
                 buffer = '';
               }
@@ -1251,6 +1805,8 @@ export class AIStreamService {
             }
             
             // 发送 tool_end 回调，根据实际结果返回状态
+            const endSeq2 = getNextSeq();
+            const endToolEventId2 = `tool_${fileEditToolCallId}`;
             callback({
               type: 'tool_end',
               toolName: 'edit_file' as ToolName,
@@ -1261,17 +1817,51 @@ export class AIStreamService {
                 data: writeSuccess ? { file_path: fileEditPath } : undefined,
               },
               toolCallId: fileEditToolCallId,
+              streamEvent: {
+                id: endToolEventId2,
+                seq: endSeq2,
+                type: 'tool',
+                toolCallId: fileEditToolCallId,
+                toolName: 'edit_file',
+                params: { file_path: fileEditPath },
+                status: writeSuccess ? 'completed' : 'error',
+                result: writeSuccess ? { file_path: fileEditPath } : undefined,
+                error: writeError ? `文件写入失败: ${writeError.message} (${(writeError as any).code || 'unknown'})` : undefined,
+                timestamp: Date.now(),
+              }
             });
           } else if (inThinkBlock) {
             // 未闭合的 think 块
             thinkContent += buffer;
             roundThinking += thinkContent;
-            callback({ type: 'thinking', content: buffer });
+            const seq = getNextSeq();
+            callback({
+              type: 'thinking',
+              content: buffer,
+              streamEvent: {
+                id: `thinking_${Date.now()}_${seq}`,
+                seq,
+                type: 'thinking',
+                text: buffer,
+                timestamp: Date.now(),
+              }
+            });
           } else {
             // 普通内容
             const filtered = this.filterToolCalls(buffer);
             if (filtered) {
-              callback({ type: 'content', content: filtered });
+              const seq = getNextSeq();
+              callback({
+                type: 'content',
+                content: filtered,
+                streamEvent: {
+                  id: `content_${Date.now()}_${seq}`,
+                  seq,
+                  type: 'content',
+                  text: filtered,
+                  timestamp: Date.now(),
+                },
+              });
             }
           }
         }
@@ -1297,11 +1887,51 @@ export class AIStreamService {
               });
             } catch (e) {
               console.error('解析 function call 参数失败:', e);
-              // ========== 调试日志：打印原始 arguments ==========
-              console.error('[DEBUG] 解析失败的原始 arguments:', toolCall.function.arguments);
-              console.error('[DEBUG] arguments 长度:', toolCall.function.arguments?.length);
-              console.error('[DEBUG] arguments 最后 200 字符:', toolCall.function.arguments?.slice(-200));
-              // ===================================================
+              logger.error('tool_arguments_parse_failed', {
+                traceId: effectiveTraceId,
+                toolCallId: toolCall.id,
+                functionName: toolCall.function.name,
+                argumentsLength: toolCall.function.arguments?.length,
+                argumentsPreview: toolCall.function.arguments?.slice(0, 200),
+                argumentsEnd: toolCall.function.arguments?.slice(-200),
+                error: e instanceof Error ? e.message : String(e),
+              });
+              
+              // 尝试补救截断的 JSON
+              const remediationResult = await this.remediateTruncatedArguments(
+                toolCall,
+                messages,
+                client,
+                model,
+                requestParams,
+                effectiveTraceId,
+                roundCount,
+                finishReason,
+                baseSystemPrompt,
+                contextLength
+              );
+              
+              if (remediationResult.success && remediationResult.parsedArgs) {
+                toolCalls.push({
+                  tool: toolCall.function.name as ToolName,
+                  params: remediationResult.parsedArgs,
+                  id: toolCall.id,
+                });
+                logger.info('tool_arguments_remediation_success', {
+                  traceId: effectiveTraceId,
+                  toolCallId: toolCall.id,
+                  attempts: remediationResult.attempts,
+                });
+              } else {
+                logger.error('tool_arguments_remediation_failed', {
+                  traceId: effectiveTraceId,
+                  toolCallId: toolCall.id,
+                  attempts: remediationResult.attempts,
+                  error: remediationResult.error,
+                });
+                // 补救失败，跳过这个工具调用
+                continue;
+              }
             }
           }
         }
@@ -1317,10 +1947,25 @@ export class AIStreamService {
           )
         );
 
+        // 记录检测到的工具调用
+        if (toolCalls.length > 0) {
+          logger.info('tool_call_detected', {
+            traceId: effectiveTraceId,
+            round: roundCount,
+            toolCallCount: toolCalls.length,
+            toolNames: toolCalls.map(tc => tc.tool),
+            hasNativeFunctionCall: toolCallsFromFunction.length > 0,
+            hasXmlFunctionCall: xmlToolCalls.length > 0
+          });
+        }
+
         // 执行工具调用
         if (toolCalls.length > 0) {
           console.log('[AIStreamService] Executing tool calls:', toolCalls.length);
-          
+          // 更新工具调用统计
+          totalToolCalls += toolCalls.length;
+          hasToolCallInSession = true;
+
           for (const toolCall of toolCalls) {
             // 使用原始工具调用ID（来自API）或生成新ID
             const toolCallId = toolCall.id || `tool_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1340,23 +1985,50 @@ export class AIStreamService {
             }
 
             console.log(`[AIStreamService] Sending tool_start: ${toolCallId}, tool: ${toolCall.tool}`);
+            const toolSeq = getNextSeq();
+            const toolEventId = `tool_${toolCallId}`;
+            sentToolEvents.set(toolCallId, toolSeq);
             callback({
               type: 'tool_start',
               toolName: toolCall.tool,
               toolParams: toolCall.params,
               toolCallId,
+              streamEvent: {
+                id: toolEventId,
+                seq: toolSeq,
+                type: 'tool',
+                toolCallId,
+                toolName: toolCall.tool,
+                params: toolCall.params,
+                status: 'running',
+                timestamp: Date.now(),
+              }
             });
 
-            const result = await toolService.executeTool(toolCall);
+            const result = await toolService.executeTool(toolCall, traceId);
             console.log(`[AIStreamService] Tool executed: ${toolCallId}, success: ${result.success}`);
 
             // 发送 tool_end 回调
             console.log(`[AIStreamService] Sending tool_end: ${toolCallId}`);
+            const toolEndSeq = getNextSeq();
+            const toolEndEventId = `tool_${toolCallId}`;
             callback({
               type: 'tool_end',
               toolName: toolCall.tool,
               toolResult: result,
               toolCallId,
+              streamEvent: {
+                id: toolEndEventId,
+                seq: toolEndSeq,
+                type: 'tool',
+                toolCallId,
+                toolName: toolCall.tool,
+                params: toolCall.params,
+                status: result.success ? 'completed' : 'error',
+                result: result.success ? result.data : undefined,
+                error: result.error,
+                timestamp: Date.now(),
+              }
             });
 
             // 将工具结果添加到消息历史（使用 OpenAI Function Call 格式）
@@ -1383,14 +2055,86 @@ export class AIStreamService {
           continue;
         }
 
+        // 检查是否需要自动续写（finish_reason === 'length'）
+        if (finishReason === 'length' && continuationCount < maxContinuations) {
+          continuationCount++;
+          isContinuation = true;
+          accumulatedContent += fullContent;
+          
+          logger.info('stream_continuation_triggered', {
+            traceId: effectiveTraceId,
+            round: roundCount,
+            continuationCount,
+            maxContinuations,
+            accumulatedContentLength: accumulatedContent.length,
+            finishReason,
+          });
+
+          // 构建续写消息
+          const continuationMessage: Message = {
+            role: 'user',
+            content: `继续上一条未完成的回复，禁止重复已输出内容；如果停在 JSON / 标签 / 结构中间，请先补齐结构，再继续正文。`,
+          };
+
+          // 添加 assistant 的回复到消息历史
+          messages.push({
+            role: 'assistant',
+            content: fullContent,
+          });
+          
+          // 添加续写请求
+          messages.push(continuationMessage);
+
+          logger.info('stream_continuation_message_added', {
+            traceId: effectiveTraceId,
+            round: roundCount,
+            continuationCount,
+            messageCount: messages.length,
+          });
+
+          // 继续下一轮以获取续写内容
+          continue;
+        }
+
+        // 如果是因为 length 停止但已达到最大续写次数，记录日志
+        if (finishReason === 'length' && continuationCount >= maxContinuations) {
+          logger.warn('stream_continuation_max_reached', {
+            traceId: effectiveTraceId,
+            round: roundCount,
+            continuationCount,
+            maxContinuations,
+            accumulatedContentLength: accumulatedContent.length,
+          });
+        }
+
         // 没有工具调用，结束对话
         break;
       }
 
       // 发送完成信号
       callback({ type: 'done' });
-    } catch (error) {
+
+      // 记录流完成 - 使用正确的工具调用统计
+      logger.info('stream_complete', {
+        traceId: effectiveTraceId,
+        totalRounds: roundCount,
+        hasToolCall: hasToolCallInSession,
+        toolCallCount: totalToolCalls,
+        isNormalTextResponse: !hasToolCallInSession,
+        continuationCount,
+        hadContinuation: continuationCount > 0,
+      });
+    } catch (error: any) {
       console.error('AI Stream Service Error:', error);
+
+      // 记录流错误
+      logger.error('stream_error', {
+        traceId: effectiveTraceId,
+        error: error?.message || String(error),
+        stack: error?.stack,
+        round: currentRound
+      });
+
       callback({ type: 'error', error: String(error) });
     }
   }

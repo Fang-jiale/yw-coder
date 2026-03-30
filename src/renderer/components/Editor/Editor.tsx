@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import Editor from '@monaco-editor/react';
+import { loader } from '@monaco-editor/react';
 import { X, Circle, Wand2, ListTree } from 'lucide-react';
 import { useWorkspaceStore } from '@/store/workspaceStore';
 import { useSettingsStore } from '@/store/settingsStore';
@@ -10,6 +11,15 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import * as monaco from 'monaco-editor';
 
+// 配置 Monaco Editor 使用本地资源，而不是从 CDN 加载
+// 这对于离线环境（如内网 Windows 10 云桌面）是必需的
+loader.config({
+  monaco: monaco,
+});
+
+// 添加 Monaco 挂载超时检测
+const MONACO_MOUNT_TIMEOUT = 3000;
+
 interface SymbolInfo {
   name: string;
   kind: monaco.languages.SymbolKind;
@@ -18,14 +28,14 @@ interface SymbolInfo {
 }
 
 export const CodeEditor: React.FC = () => {
-  const { 
-    openFiles, 
-    activeFilePath, 
-    setActiveFile, 
-    closeFile, 
+  const {
+    openFiles,
+    activeFilePath,
+    setActiveFile,
+    closeFile,
     reorderFiles,
     updateFileContent,
-    saveFile 
+    saveFile
   } = useWorkspaceStore();
   const { theme, fontSize, fontFamily, tabSize, wordWrap, minimap } = useSettingsStore();
   const [editorInstance, setEditorInstance] = useState<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -34,8 +44,34 @@ export const CodeEditor: React.FC = () => {
   const [symbols, setSymbols] = useState<SymbolInfo[]>([]);
   const [draggedTab, setDraggedTab] = useState<string | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const mountStartTimeRef = useRef<number>(0);
+  const mountTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // 使用 Map 来跟踪每个文件的挂载状态，避免 StrictMode 双重渲染问题
+  // key: filePath, value: { mountStarted: boolean, mountCompleted: boolean }
+  const loggedFilesMapRef = useRef<Map<string, { mountStarted: boolean; mountCompleted: boolean }>>(new Map());
 
   const activeFile = openFiles.find(f => f.path === activeFilePath);
+
+  // 记录编辑器组件渲染
+  useEffect(() => {
+    window.electronAPI?.logRenderEvent?.('editor_component_render', {
+      activeFilePath,
+      language: activeFile?.language,
+      openFilesCount: openFiles.length,
+    });
+  }, [activeFilePath, activeFile?.language, openFiles.length]);
+
+  // 当 activeFile 变化时，清理之前的 timeout
+  useEffect(() => {
+    if (mountTimeoutRef.current) {
+      clearTimeout(mountTimeoutRef.current);
+      mountTimeoutRef.current = null;
+    }
+    // 重置当前文件的挂载开始时间
+    if (activeFilePath) {
+      mountStartTimeRef.current = Date.now();
+    }
+  }, [activeFilePath]);
 
   // Use inline completion hook
   useInlineCompletion(editorInstance);
@@ -105,6 +141,33 @@ export const CodeEditor: React.FC = () => {
   const { setSelection } = useCodeEditorStore();
 
   const handleEditorDidMount = (editor: monaco.editor.IStandaloneCodeEditor) => {
+    // 清除超时检测
+    if (mountTimeoutRef.current) {
+      clearTimeout(mountTimeoutRef.current);
+      mountTimeoutRef.current = null;
+    }
+
+    // 如果当前文件已经挂载完成，不再重复记录
+    if (activeFilePath && loggedFilesMapRef.current.get(activeFilePath)?.mountCompleted) {
+      console.log(`[Editor] Monaco already mounted for ${activeFilePath}, skipping duplicate log`);
+      setEditorInstance(editor);
+      editorRef.current = editor;
+      return;
+    }
+
+    const durationMs = Date.now() - mountStartTimeRef.current;
+
+    // 记录 Monaco 挂载成功
+    window.electronAPI?.logRenderEvent?.('editor_monaco_mount_success', {
+      activeFilePath,
+      durationMs,
+    });
+
+    // 标记当前文件挂载完成
+    if (activeFilePath) {
+      loggedFilesMapRef.current.set(activeFilePath, { mountStarted: true, mountCompleted: true });
+    }
+
     setEditorInstance(editor);
     editorRef.current = editor;
     setShowCompletionHint(true);
@@ -128,7 +191,7 @@ export const CodeEditor: React.FC = () => {
       const selection = e.selection;
       const startLine = selection.startLineNumber;
       const endLine = selection.endLineNumber;
-      
+
       // Only capture if there's actual selection (not just cursor position)
       if (startLine !== endLine || selection.startColumn !== selection.endColumn) {
         const selectedText = model.getValueInRange(selection);
@@ -328,14 +391,52 @@ export const CodeEditor: React.FC = () => {
           {/* Editor */}
           <div className="flex-1 relative">
             {activeFile && (
-              <Editor
-                height="100%"
-                language={activeFile.language}
-                value={activeFile.content}
-                onChange={handleEditorChange}
-                theme={theme === 'dark' ? 'vs-dark' : 'vs'}
-                onMount={handleEditorDidMount}
-                options={{
+              <>
+                {(() => {
+                  // 检查当前文件是否已经记录过挂载开始
+                  const fileStatus = activeFilePath ? loggedFilesMapRef.current.get(activeFilePath) : undefined;
+
+                  // 只在第一次渲染时记录挂载开始和设置超时
+                  if (!fileStatus?.mountStarted) {
+                    mountStartTimeRef.current = Date.now();
+
+                    // 标记当前文件挂载开始
+                    if (activeFilePath) {
+                      loggedFilesMapRef.current.set(activeFilePath, { mountStarted: true, mountCompleted: false });
+                    }
+
+                    window.electronAPI?.logRenderEvent?.('editor_monaco_mount_start', {
+                      activeFilePath,
+                      language: activeFile.language,
+                    });
+
+                    // 设置超时检测
+                    mountTimeoutRef.current = setTimeout(() => {
+                      // 超时触发时，检查是否已经完成挂载
+                      const currentStatus = activeFilePath ? loggedFilesMapRef.current.get(activeFilePath) : undefined;
+                      if (currentStatus?.mountCompleted) {
+                        // 已经挂载完成，不记录 timeout
+                        console.log(`[Editor] Monaco mount completed before timeout for ${activeFilePath}`);
+                        return;
+                      }
+                      window.electronAPI?.logRenderEvent?.('editor_monaco_mount_timeout', {
+                        activeFilePath,
+                        language: activeFile.language,
+                        timeoutMs: MONACO_MOUNT_TIMEOUT,
+                      });
+                    }, MONACO_MOUNT_TIMEOUT);
+                  }
+
+                  return null;
+                })()}
+                <Editor
+                  height="100%"
+                  language={activeFile.language}
+                  value={activeFile.content}
+                  onChange={handleEditorChange}
+                  theme={theme === 'dark' ? 'vs-dark' : 'vs'}
+                  onMount={handleEditorDidMount}
+                  options={{
                   fontSize: fontSize,
                   fontFamily: fontFamily,
                   tabSize: tabSize,
@@ -409,7 +510,8 @@ export const CodeEditor: React.FC = () => {
                   cursorSmoothCaretAnimation: 'on',
                   cursorStyle: 'line',
                 }}
-              />
+                />
+              </>
             )}
 
             {/* Completion Hint */}

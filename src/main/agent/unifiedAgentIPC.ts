@@ -15,6 +15,7 @@ import { aiStreamService, StreamChunk } from '../services/aiStreamService';
 import { DynamicSoloExecutor, ExecutionPlan, ExecutionPlanStep } from './solo/DynamicSoloExecutor';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { logger } from '../utils/logger';
 
 // 调试模式开关
 const DEBUG = process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development';
@@ -432,6 +433,21 @@ export function registerUnifiedAgentIPC(): void {
       return { success: true };
     }
 
+    // Chat 模式：先将 user message 写入 task.messages，确保历史完整
+    const userMessage: AgentMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content,
+      timestamp: Date.now(),
+    };
+    session.task.messages.push(userMessage);
+    logger.info('chat_user_message_added', {
+      taskId: session.task.id,
+      messageId: userMessage.id,
+      contentLength: content.length,
+      totalMessages: session.task.messages.length
+    });
+
     // 使用传入的 AI 配置（对话框当前选择的），如果没有则使用 session 中的配置
     const effectiveAIConfig = aiConfig || session.config.aiConfig;
 
@@ -621,6 +637,19 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
   // 使用传入的 AI 配置，如果没有则使用 session 中的配置
   const effectiveAIConfig = aiConfig || config.aiConfig;
 
+  // 生成 traceId 用于追踪本轮对话
+  const traceId = logger.generateTraceId('chat');
+
+  // 记录请求接收
+  logger.info('chat_request_received', {
+    traceId,
+    taskId: task.id,
+    workspacePath: task.workspacePath,
+    contentLength: content.length,
+    model: effectiveAIConfig?.model,
+    provider: effectiveAIConfig?.provider
+  });
+
   return new Promise((resolve, reject) => {
     let fullContent = '';
     let thinking = '';
@@ -635,13 +664,19 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
     }> = [];
 
     const handleChunk = (chunk: StreamChunk) => {
+      // 只发送标准化的 stream-item 事件，移除重复的 IPC 事件
+      // 这是关键优化：减少一半的 IPC 通信开销
+      if (chunk.streamEvent) {
+        broadcastToRenderer('agent:event:stream-item', {
+          taskId: task.id,
+          item: chunk.streamEvent,
+        });
+      }
+
       switch (chunk.type) {
         case 'thinking':
           thinking += chunk.content || '';
-          broadcastToRenderer('agent:event:stream-thinking', {
-            taskId: task.id,
-            thinking: chunk.content
-          });
+          // 移除重复的 stream-thinking 事件，只保留 stream-item
           break;
         case 'thinking_complete':
           // 思考过程完成，发送完整思考内容
@@ -653,15 +688,21 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
           break;
         case 'content':
           fullContent += chunk.content || '';
-          DEBUG && console.log('[executeChatMode] Sending stream-content:', chunk.content?.slice(0, 50), '...');
-          broadcastToRenderer('agent:event:stream-content', {
-            taskId: task.id,
-            content: chunk.content
-          });
+          // 移除重复的 stream-content 事件，只保留 stream-item
+          // DEBUG && console.log('[executeChatMode] Content chunk, length:', chunk.content?.length);
           break;
         case 'tool_start': {
           const toolCallId = chunk.toolCallId || `tool_${Date.now()}`;
           DEBUG && console.log(`[executeChatMode] Tool started: ${toolCallId}, name: ${chunk.toolName}`);
+
+          // 记录 tool_start 事件发送
+          logger.info('emit_tool_start', {
+            traceId,
+            taskId: task.id,
+            toolCallId,
+            toolName: chunk.toolName
+          });
+
           const toolCall = {
             id: toolCallId,
             toolName: chunk.toolName || '',
@@ -691,6 +732,16 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
           } else {
             console.error(`[executeChatMode] Tool call not found: ${toolCallId}`);
           }
+
+          // 记录 tool_end 事件发送
+          logger.info('emit_tool_end', {
+            traceId,
+            taskId: task.id,
+            toolCallId,
+            toolName: chunk.toolName,
+            success: chunk.toolResult?.success
+          });
+
           broadcastToRenderer('agent:event:tool-result', {
             taskId: task.id,
             toolCall: {
@@ -737,6 +788,15 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
           session.isRunning = false;
           task.status = 'completed';
 
+          // 记录 done 事件发送
+          logger.info('emit_done', {
+            traceId,
+            taskId: task.id,
+            contentLength: fullContent.length,
+            toolCallCount: toolCalls.length,
+            status: 'completed'
+          });
+
           // 先广播消息，确保 UI 立即更新
           broadcastToRenderer('agent:event:message', {
             taskId: task.id,
@@ -757,6 +817,15 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
         case 'error': {
           session.isRunning = false;
           task.status = 'failed';
+
+          // 记录 error 事件发送
+          logger.error('emit_error', {
+            traceId,
+            taskId: task.id,
+            error: chunk.error,
+            status: 'failed'
+          });
+
           // 保存任务到磁盘
           updateTaskOnDisk(task).then(() => {
             broadcastToRenderer('agent:event:error', {
@@ -774,19 +843,22 @@ async function executeChatMode(session: any, content: string, aiConfig?: AIProvi
       }
     };
 
-    // 构建历史消息
+    // 构建历史消息 - 排除最后一条 user message（因为已经在 task.messages 中）
+    // streamExecute 会通过 context.history 获取历史，然后自己决定是否追加 userInput
     const history = task.messages.map((m: AgentMessage) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
 
-    // 调用 AI 流式服务，使用当前选择的 AI 配置
+    // 调用 AI 流式服务，使用当前选择的 AI 配置，传入 traceId 保持链路追踪
+    // 注意：history 已经包含了当前轮的 user message，所以 streamExecute 不应该再追加 userInput
     aiStreamService.streamExecute(
       content,
       task.workspacePath,
       effectiveAIConfig,
       handleChunk,
-      { history }
+      { history, skipUserInputAppend: true },
+      traceId
     ).catch(async (error: any) => {
       console.error('[executeChatMode] streamExecute error:', error);
       session.isRunning = false;

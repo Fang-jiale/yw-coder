@@ -5,6 +5,7 @@
 
 import React from 'react';
 import { useUnifiedAgentStore } from '@/store/unifiedAgentStore';
+import { useShallow } from 'zustand/react/shallow';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -36,11 +37,30 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
   className,
   onNewChat,
 }) => {
-  const { tasks, activeTaskId, setActiveTask, setActiveConfig, deleteTask } = useUnifiedAgentStore();
+  // 使用 useShallow 优化订阅，避免订阅整个 tasks 数组
+  // 只订阅任务列表的元数据，不订阅消息内容
+  const { taskList, activeTaskId, setActiveTask, setActiveConfig, deleteTask } = useUnifiedAgentStore(
+    useShallow((state) => ({
+      // 只提取任务列表的元数据，不包含消息内容
+      taskList: state.tasks.map((task) => ({
+        id: task.id,
+        title: task.title,
+        createdAt: task.createdAt,
+        status: task.status,
+        runtimeMode: task.runtimeMode,
+        // 只取第一条用户消息用于预览
+        preview: task.messages.find((m) => m.role === 'user')?.content?.slice(0, 100) || '',
+      })),
+      activeTaskId: state.activeTaskId,
+      setActiveTask: state.setActiveTask,
+      setActiveConfig: state.setActiveConfig,
+      deleteTask: state.deleteTask,
+    }))
+  );
 
   // 按日期分组任务
   const groupedTasks = React.useMemo(() => {
-    const groups: { [key: string]: typeof tasks } = {
+    const groups: { [key: string]: typeof taskList } = {
       '今天': [],
       '昨天': [],
       '最近7天': [],
@@ -52,7 +72,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
     const lastWeek = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    tasks.forEach((task) => {
+    taskList.forEach((task) => {
       const taskDate = new Date(task.createdAt);
       if (taskDate >= today) {
         groups['今天'].push(task);
@@ -66,11 +86,11 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
     });
 
     return groups;
-  }, [tasks]);
+  }, [taskList]);
 
   // 获取任务图标
-  const getTaskIcon = (task: typeof tasks[0]) => {
-    const mode = task.runtimeMode || 'chat';
+  const getTaskIcon = (runtimeMode?: string) => {
+    const mode = runtimeMode || 'chat';
     switch (mode) {
       case 'solo':
         return <Sparkles className="w-3.5 h-3.5 text-amber-500" />;
@@ -114,11 +134,10 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
       .trim();
   };
 
-  // 获取任务第一条消息预览
-  const getTaskPreview = (task: typeof tasks[0]) => {
-    const firstUserMessage = task.messages.find((m) => m.role === 'user');
-    if (firstUserMessage) {
-      const filteredContent = filterTags(firstUserMessage.content);
+  // 获取任务预览（使用已提取的 preview）
+  const getTaskPreview = (task: { preview: string }) => {
+    if (task.preview) {
+      const filteredContent = filterTags(task.preview);
       return filteredContent.slice(0, 50) + (filteredContent.length > 50 ? '...' : '');
     }
     return '新对话';
@@ -168,7 +187,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
                     }}
                   >
                     <div className="mt-0.5 flex-shrink-0">
-                      {getTaskIcon(task)}
+                      {getTaskIcon(task.runtimeMode)}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -213,7 +232,7 @@ export const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
             ) : null
           )}
 
-          {tasks.length === 0 && (
+          {taskList.length === 0 && (
             <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
               <MessageSquare className="w-10 h-10 mb-3 opacity-30" />
               <p className="text-sm">暂无历史记录</p>

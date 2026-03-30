@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { logger } from '../utils/logger';
 
 const execAsync = promisify(exec);
 
@@ -278,53 +279,108 @@ export class AIToolService {
   /**
    * 执行工具调用
    */
-  async executeTool(toolCall: ToolCall): Promise<ToolResult> {
+  async executeTool(toolCall: ToolCall, traceId?: string): Promise<ToolResult> {
     const { tool, params } = toolCall;
+    const startTime = Date.now();
+
+    // 记录工具执行开始
+    logger.info('tool_execute_start', {
+      traceId,
+      toolName: tool,
+      params: Object.keys(params),
+      workspacePath: this.workspacePath
+    });
 
     try {
+      let result: ToolResult;
+
       switch (tool) {
         case 'read_file':
-          return await this.readFile(params.file_path, params.offset, params.limit);
+          result = await this.readFile(params.file_path, params.offset, params.limit);
+          break;
         case 'write_file':
-          return await this.writeFile(params.file_path, params.content);
+          result = await this.writeFile(params.file_path, params.content);
+          break;
         case 'edit_file':
-          return await this.editFile(params.file_path, params.old_string, params.new_string);
+          result = await this.editFile(params.file_path, params.old_string, params.new_string);
+          break;
         case 'search_files':
-          return await this.searchFiles(params.query, params.file_pattern, params.path);
+          result = await this.searchFiles(params.query, params.file_pattern, params.path);
+          break;
         case 'list_files':
-          return await this.listFiles(params.dir_path || '', params.recursive || false);
+          result = await this.listFiles(params.dir_path || '', params.recursive || false);
+          break;
         case 'execute_command':
-          return await this.executeCommand(params.command, params.cwd, params.timeout);
+          result = await this.executeCommand(params.command, params.cwd, params.timeout);
+          break;
         case 'grep_search':
-          return await this.grepSearch(params.pattern, params.path, params.include);
+          result = await this.grepSearch(params.pattern, params.path, params.include);
+          break;
         case 'glob_search':
-          return await this.globSearch(params.pattern, params.cwd);
+          result = await this.globSearch(params.pattern, params.cwd);
+          break;
         case 'get_file_info':
-          return await this.getFileInfo(params.file_path);
+          result = await this.getFileInfo(params.file_path);
+          break;
         case 'ask_followup_question':
-          return {
+          result = {
             tool: 'ask_followup_question',
             success: true,
             data: { question: params.question, options: params.options },
           };
+          break;
         case 'attempt_completion':
-          return {
+          result = {
             tool: 'attempt_completion',
             success: true,
             data: { result: params.result, command: params.command },
           };
+          break;
         default:
-          return {
+          result = {
             tool,
             success: false,
             error: `未知工具: ${tool}`,
           };
       }
+
+      // 记录工具执行完成
+      const durationMs = Date.now() - startTime;
+      if (result.success) {
+        logger.info('tool_execute_end', {
+          traceId,
+          toolName: tool,
+          success: true,
+          durationMs
+        });
+      } else {
+        logger.warn('tool_execute_end', {
+          traceId,
+          toolName: tool,
+          success: false,
+          durationMs,
+          error: result.error
+        });
+      }
+
+      return result;
     } catch (error) {
+      const durationMs = Date.now() - startTime;
+      const errorMessage = String(error);
+
+      // 记录工具执行失败
+      logger.error('tool_execute_end', {
+        traceId,
+        toolName: tool,
+        success: false,
+        durationMs,
+        error: errorMessage
+      });
+
       return {
         tool,
         success: false,
-        error: String(error),
+        error: errorMessage,
       };
     }
   }
